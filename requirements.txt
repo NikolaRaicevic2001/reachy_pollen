@@ -1,0 +1,9 @@
+grpcio==1.73.1
+grpcio-tools==1.73.1
+numpy==2.2.6
+opencv-python==4.13.0.92
+packaging==26.0
+protobuf==6.32.0
+pyquaternion==0.9.9
+reachy2-sdk==1.0.15
+reachy2_sdk_api==1.0.21
