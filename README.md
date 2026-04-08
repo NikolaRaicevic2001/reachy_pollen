@@ -144,6 +144,9 @@ lerobot-record `
 --robot.with_r_arm=true `
 --robot.with_neck=true `
 --robot.with_antennas=false `
+--robot.with_torso_camera=false `
+--robot.camera_width=640 `
+--robot.camera_height=480 `
 --teleop.type=reachy2_teleoperator `
 --teleop.ip_address=192.168.137.162 `
 --teleop.use_present_position=true `
@@ -155,18 +158,19 @@ lerobot-record `
 --dataset.repo_id=erl-hub/reachy-pick-and-place `
 --dataset.single_task="Reachy 2 pick and place test" `
 --dataset.num_episodes=1 `
---dataset.episode_time_s=45 `
+--dataset.episode_time_s=30 `
 --dataset.fps=15 `
 --dataset.vcodec=h264_nvenc `
 --dataset.streaming_encoding=false `
 --dataset.push_to_hub=true `
---display_data=false 
+--display_data=false `
 --resume=true
 ```
 
 - Remove or rename dataset after every recording:
 ```
 Remove-Item -Recurse -Force "C:\Users\nikra\.cache\huggingface\lerobot\erl-hub\reachy-pick-and-place"
+Remove-Item -Recurse -Force "C:\Users\nikra\.cache\huggingface\lerobot\erl-hub\reachy-pick-and-place-images"
 ```
 
 ### Upload the datasets
@@ -196,7 +200,7 @@ lerobot-replay `
     --robot.use_external_commands=false `
     --robot.with_mobile_base=false `
     --dataset.repo_id=erl-hub/reachy-pick-and-place/ `
-    --dataset.episode=0 
+    --dataset.episode=2
 ```
 
 - Hub
@@ -212,5 +216,5 @@ lerobot-replay `
 --robot.with_neck=true `
 --robot.with_antennas=false `
 --dataset.repo_id="erl-hub/reachy-pick-and-place" `
---dataset.episode=0
+--dataset.episode=4
 ```
