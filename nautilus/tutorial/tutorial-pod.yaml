@@ -5,10 +5,10 @@ metadata:
 spec:
   containers:
   - name: gpu-container
-    image: docker.io/bitnami/pytorch:latest
+    image: gitlab-registry.nrp-nautilus.io/zihaozhou/nautilus_tutorial:jupyterhub
     command: ["jupyter", "lab", "--NotebookApp.token=627a7b3b"]
     volumeMounts:
-    - mountPath: /tutorial
+    - mountPath: /nikola_volume
       name: nikola-volume
     resources:
       limits:
