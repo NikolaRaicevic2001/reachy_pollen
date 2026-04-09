@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tutorial-pod
+spec:
+  containers:
+  - name: gpu-container
+    image: docker.io/bitnami/pytorch:latest
+    command: ["jupyter", "lab", "--NotebookApp.token=627a7b3b"]
+    volumeMounts:
+    - mountPath: /tutorial
+      name: nikola-volume
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+        memory: "8G"
+        cpu: "4"
+  restartPolicy: Never
+  volumes:
+    - name: nikola-volume
+      persistentVolumeClaim:
+        claimName: nikola-volume

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nikola-pod
+spec:
+  containers:
+  - name: gpu-container
+    image: gitlab-registry.nrp-nautilus.io/zihaozhou/nautilus_tutorial:jupyterhub
+    command: ["jupyter", "lab", "--NotebookApp.token=627a7b3b"]
+    volumeMounts:
+    - mountPath: /nikola
+      name: nikola-volume
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+        memory: "16G"
+        cpu: "16"
+  restartPolicy: Never
+  volumes:
+    - name: nikola-volume
+      persistentVolumeClaim:
+        claimName: nikola-volume
