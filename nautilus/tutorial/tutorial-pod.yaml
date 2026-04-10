@@ -5,8 +5,8 @@ metadata:
 spec:
   containers:
   - name: gpu-container
-    image: gitlab-registry.nrp-nautilus.io/zihaozhou/nautilus_tutorial:jupyterhub
-    command: ["jupyter", "lab", "--NotebookApp.token=627a7b3b"]
+    image: dhbhatt/rainbow-demorl:latest
+    command: ["/bin/bash", "-c", "sleep 21600"]
     volumeMounts:
     - mountPath: /nikola_volume
       name: nikola-volume

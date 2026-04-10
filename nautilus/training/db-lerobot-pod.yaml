@@ -26,6 +26,8 @@ spec:
     volumeMounts:
     - mountPath: /pers_vol
       name: db-cephfs-volume
+    - mountPath: /nikola_vol
+      name: nikola-volume
     # PyTorch DataLoader workers need enough POSIX shm; default /dev/shm is ~64Mi in K8s.
     - mountPath: /dev/shm
       name: dshm
@@ -138,6 +140,9 @@ spec:
     - name: db-cephfs-volume
       persistentVolumeClaim:
         claimName: db-cephfs-volume
+    - name: nikola-volume
+      persistentVolumeClaim:
+        claimName: nikola-volume
     - name: dshm
       emptyDir:
         medium: Memory

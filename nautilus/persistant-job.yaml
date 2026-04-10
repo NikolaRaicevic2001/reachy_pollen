@@ -7,7 +7,7 @@ spec:
     spec:
       containers:
       - name: gpu-container
-        image: gitlab-registry.nrp-nautilus.io/zihaozhou/nautilus_tutorial:jupyterhub
+        image: dhbhatt/rainbow-demorl:latest
         command: ["/bin/bash","-c"]
         args: ["mkdir MNIST; cd MNIST;
                 wget https://raw.githubusercontent.com/pytorch/examples/main/mnist/main.py;
