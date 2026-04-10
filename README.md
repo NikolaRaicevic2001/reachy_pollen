@@ -132,7 +132,8 @@ lerobot-record `
 --display_data=false
 ```
 
-- Higher Frequency Setup
+Higher Frequency Setup
+- Windows
 ```
 lerobot-record `
 --robot.type=reachy2 `
@@ -144,7 +145,9 @@ lerobot-record `
 --robot.with_r_arm=true `
 --robot.with_neck=true `
 --robot.with_antennas=false `
---robot.with_torso_camera=false `
+--robot.with_left_teleop_camera=false `
+--robot.with_right_teleop_camera=false `
+--robot.with_torso_camera=true `
 --robot.camera_width=640 `
 --robot.camera_height=480 `
 --teleop.type=reachy2_teleoperator `
@@ -155,16 +158,57 @@ lerobot-record `
 --teleop.with_r_arm=true `
 --teleop.with_neck=true `
 --teleop.with_antennas=false `
---dataset.repo_id=erl-hub/reachy-pick-and-place `
+--dataset.repo_id=erl-hub/reachy-pick-and-place-images `
 --dataset.single_task="Reachy 2 pick and place test" `
 --dataset.num_episodes=1 `
 --dataset.episode_time_s=30 `
 --dataset.fps=15 `
---dataset.vcodec=h264_nvenc `
+--dataset.vcodec=h264 `
 --dataset.streaming_encoding=false `
 --dataset.push_to_hub=true `
 --display_data=false `
 --resume=true
+```
+-Linux
+```
+lerobot-record \
+  --robot.type=reachy2 \
+  --robot.ip_address="192.168.137.162" \
+  --robot.id="r2-0008" \
+  --robot.use_external_commands=true \
+  --robot.with_mobile_base=false \
+  --robot.with_l_arm=true \
+  --robot.with_r_arm=true \
+  --robot.with_neck=true \
+  --robot.with_antennas=false \
+  --robot.with_left_teleop_camera=false \
+  --robot.with_right_teleop_camera=false \
+  --robot.with_torso_camera=true \
+  --robot.camera_width=640 \
+  --robot.camera_height=480 \
+  --teleop.type=reachy2_teleoperator \
+  --teleop.ip_address="192.168.137.162" \
+  --teleop.use_present_position=true \
+  --teleop.with_mobile_base=false \
+  --teleop.with_l_arm=true \
+  --teleop.with_r_arm=true \
+  --teleop.with_neck=true \
+  --teleop.with_antennas=false \
+  --dataset.repo_id="erl-hub/reachy-pick-and-place-images" \
+  --dataset.root="outputs/reachy_test" \
+  --dataset.single_task="Reachy 2 pick and place test" \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=30 \
+  --dataset.fps=15 \
+  --dataset.vcodec=h264 \
+  --dataset.streaming_encoding=false \
+  --dataset.push_to_hub=true \
+  --display_data=false \
+  --play_sounds=false \
+  --resume=false
+```
+```
+docker run -dit   --name lerobot_container   -v $(pwd)/robot_reachy2.py:/lerobot/src/lerobot/robots/reachy2/robot_reachy2.py   huggingface/lerobot-cpu sleep infinity
 ```
 
 - Remove or rename dataset after every recording:
@@ -172,6 +216,8 @@ lerobot-record `
 Remove-Item -Recurse -Force "C:\Users\nikra\.cache\huggingface\lerobot\erl-hub\reachy-pick-and-place"
 Remove-Item -Recurse -Force "C:\Users\nikra\.cache\huggingface\lerobot\erl-hub\reachy-pick-and-place-images"
 ```
+
+
 
 ### Upload the datasets
 ```
@@ -199,8 +245,8 @@ lerobot-replay `
     --robot.ip_address=192.168.137.162 `
     --robot.use_external_commands=false `
     --robot.with_mobile_base=false `
-    --dataset.repo_id=erl-hub/reachy-pick-and-place/ `
-    --dataset.episode=2
+    --dataset.repo_id=erl-hub/reachy-pick-and-place-images `
+    --dataset.episode=0
 ```
 
 - Hub
