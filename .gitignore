@@ -1,6 +1,10 @@
+# Files
+.env
+
 # Folders
 outputs/
 reachy2/
+reachy_system2/runs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
