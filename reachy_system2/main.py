@@ -11,10 +11,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from reachy_system2.config import SafeWorkspace, settling_s_default
+from reachy_system2.config import (
+    SafeWorkspace,
+    perception_snapshot_max_attempts_default,
+    require_every_tracked_label_default,
+    settling_s_default,
+)
 from reachy_system2.executor import ActionExecutor
 from reachy_system2.perception import System2Perception
 from reachy_system2.reasoning import ReasoningClient
+from reachy_system2.robot_context import format_end_effector_context_for_llm
 from reachy_system2.run_tracker import RunTracker, log_runs_enabled
 
 logger = logging.getLogger(__name__)
@@ -41,6 +47,12 @@ def confirm_subtask_interactive(
     label = "Correction subtask" if correction else "Subtask"
     print(f"\n--- {label} {index + 1}/{total} ---")
     print(json.dumps(subtask, indent=2))
+    # In Jupyter/Cursor, input() can look like a hang if the prompt is easy to miss; flush first.
+    print(
+        "\n>>> Waiting for confirmation: type y + Enter to run this on the robot, "
+        "or n + Enter to abort. <<<",
+        flush=True,
+    )
     ans = input("Execute on hardware? [y/N]: ").strip().lower()
     return ans in ("y", "yes")
 
@@ -59,6 +71,8 @@ def run_closed_loop(
     log_runs: bool | None = None,
     run_tracker: RunTracker | None = None,
     robot_host: str | None = None,
+    perception_max_attempts: int | None = None,
+    require_every_tracked_label: bool | None = None,
 ) -> None:
     """Run perception → plan → execute → verify loop (used by CLI and notebook)."""
     settling = float(settling_s if settling_s is not None else settling_s_default())
@@ -89,14 +103,48 @@ def run_closed_loop(
                     "settling_s": settling,
                     "detection_threshold": detection_threshold,
                     "robot_host": robot_host,
+                    "perception_max_attempts": perception_max_attempts
+                    if perception_max_attempts is not None
+                    else perception_snapshot_max_attempts_default(),
+                    "require_every_tracked_label": require_every_tracked_label
+                    if require_every_tracked_label is not None
+                    else require_every_tracked_label_default(),
                 }
             )
 
-        rgb, scene = perception.snapshot(detection_threshold=detection_threshold, settling_s=settling)
+        max_att = (
+            int(perception_max_attempts)
+            if perception_max_attempts is not None
+            else perception_snapshot_max_attempts_default()
+        )
+        req_all_labels = (
+            require_every_tracked_label
+            if require_every_tracked_label is not None
+            else require_every_tracked_label_default()
+        )
+
+        snap = perception.snapshot_until_tracked_objects(
+            labels=labels,
+            detection_threshold=detection_threshold,
+            settling_s=settling,
+            max_attempts=max_att,
+            require_every_label=req_all_labels,
+        )
+        rgb, scene = snap.rgb, snap.scene
         if tracker is not None:
             tracker.write_text_file("perception_initial.txt", scene)
 
-        plan = reasoning.generate_plan(task, scene, rgb)
+        ee_context = format_end_effector_context_for_llm(reachy)
+        if tracker is not None:
+            tracker.write_text_file("robot_context_initial.txt", ee_context)
+
+        plan = reasoning.generate_plan(
+            task,
+            scene,
+            rgb,
+            tracked_labels=labels,
+            robot_context=ee_context,
+        )
         logger.info("Plan: %s", json.dumps(plan, indent=2)[:8000])
         if tracker is not None:
             tracker.write_json("plan.json", plan)
@@ -132,12 +180,14 @@ def run_closed_loop(
                     "zmin": workspace.zmin,
                     "zmax": workspace.zmax,
                 }
+                ee_ctx = format_end_effector_context_for_llm(reachy)
                 replan = reasoning.replan_out_of_workspace(
                     task=task,
                     scene_description=scene,
                     rgb=rgb,
                     rejected_xyz=validate.rejected_xyz or (0.0, 0.0, 0.0),
                     bounds=bounds,
+                    robot_context=ee_ctx,
                 )
                 if not replan["subtasks"]:
                     raise RuntimeError("Replan returned no subtasks.")
@@ -147,10 +197,11 @@ def run_closed_loop(
             if not res.ok:
                 raise RuntimeError(f"Execution failed: {res.message}")
 
-            rgb_after, scene_after = perception.snapshot(
+            snap_after = perception.snapshot(
                 detection_threshold=detection_threshold,
                 settling_s=settling,
             )
+            rgb_after, scene_after = snap_after.rgb, snap_after.scene
             verdict = reasoning.verify_execution(
                 goal=task,
                 subtask_description=str(current.get("description", "")),
@@ -228,6 +279,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Disable run directory and token logging (see also SYSTEM2_LOG_RUNS in .env).",
     )
+    parser.add_argument(
+        "--perception-max-attempts",
+        type=int,
+        default=None,
+        help="Retries before planning until detections match labels (or SYSTEM2_SNAPSHOT_MAX_ATTEMPTS).",
+    )
+    parser.add_argument(
+        "--any-label-match",
+        dest="require_every_tracked_label",
+        action="store_false",
+        help="Stop waiting when at least one object is detected (not every label).",
+    )
+    parser.set_defaults(require_every_tracked_label=True)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -263,6 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         model=args.model,
         log_runs=log_runs,
         robot_host=args.host,
+        perception_max_attempts=args.perception_max_attempts,
+        require_every_tracked_label=args.require_every_tracked_label,
     )
     return 0
 

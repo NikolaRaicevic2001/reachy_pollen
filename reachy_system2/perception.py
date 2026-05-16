@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import numpy as np
@@ -13,10 +14,22 @@ from reachy2_sdk.utils.utils import invert_affine_transformation_matrix
 from reachy_system2.config import (
     perception_detection_threshold_default,
     perception_freq_default,
+    perception_retry_settling_s_default,
+    perception_snapshot_max_attempts_default,
     settling_s_default,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PerceptionSnapshot:
+    """One perception sample: RGB frame, annotated frame, LLM scene text, structured detections."""
+
+    rgb: np.ndarray
+    annotated_rgb: np.ndarray
+    scene: str
+    objects: list[dict[str, Any]]
 
 
 def to_robot_frame(T_reachy_cam: np.ndarray, pose_cam: np.ndarray) -> np.ndarray:
@@ -28,7 +41,11 @@ def to_robot_frame(T_reachy_cam: np.ndarray, pose_cam: np.ndarray) -> np.ndarray
     return T_reachy_cam @ pose_cam
 
 
-def _translation_robot(pose_4x4: np.ndarray, T_reachy_cam: np.ndarray | None, assume_robot_frame: bool) -> np.ndarray:
+def _translation_robot(
+    pose_4x4: np.ndarray,
+    T_reachy_cam: np.ndarray | None,
+    assume_robot_frame: bool,
+) -> np.ndarray:
     """Return 3-vector position in robot base frame."""
     p = np.asarray(pose_4x4, dtype=float)
     if p.shape != (4, 4):
@@ -65,6 +82,85 @@ def format_scene_for_llm(
             parts.append(f"temporal_score={float(temp):.3f}")
         lines.append(" ".join(parts))
     return "\n".join(lines)
+
+
+def _norm_label(s: str) -> str:
+    return str(s).strip().lower()
+
+
+def label_matches_tracked(label: str, object_name: str) -> bool:
+    """Loose match: OWL-ViT names and user labels often differ slightly."""
+    a, b = _norm_label(label), _norm_label(object_name)
+    if not a or not b:
+        return False
+    return a in b or b in a
+
+
+def objects_satisfy_tracked_labels(
+    objects: Sequence[dict[str, Any]],
+    labels: Sequence[str],
+    *,
+    require_every_label: bool,
+) -> bool:
+    """Whether filtered perception objects are enough to plan."""
+    if not objects:
+        return False
+    if not labels:
+        return True
+    names = [str(o.get("name", "")) for o in objects]
+    if not require_every_label:
+        return any(n.strip() for n in names)
+    for lab in labels:
+        if not any(label_matches_tracked(lab, n) for n in names):
+            return False
+    return True
+
+
+def _detection_predictions_from_objects(
+    detected_objects: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert ``get_objects_infos`` dicts to OWL-ViT-style predictions for ``Annotator``."""
+    predictions: list[dict[str, Any]] = []
+    for obj in detected_objects:
+        bbox = obj.get("bbox")
+        if bbox is None or len(bbox) != 4:
+            continue
+        xmin, ymin, xmax, ymax = (int(v) for v in bbox)
+        predictions.append(
+            {
+                "label": str(obj.get("name", "")),
+                "score": float(obj.get("detection_score", obj.get("score", 0.0))),
+                "box": {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax},
+            }
+        )
+    return predictions
+
+
+def annotate_rgb(rgb: np.ndarray, detected_objects: Sequence[dict[str, Any]]) -> np.ndarray:
+    """Draw boxes (and masks when present) for filtered Perception objects on ``rgb``."""
+    from pollen_vision.utils import Annotator
+
+    im = np.asarray(rgb)
+    if im.ndim != 3:
+        raise ValueError(f"Expected HxWxC image, got shape {im.shape}")
+
+    predictions = _detection_predictions_from_objects(detected_objects)
+    if not predictions:
+        return im.copy()
+
+    masks: list[np.ndarray] = []
+    for obj in detected_objects:
+        bbox = obj.get("bbox")
+        if bbox is None or len(bbox) != 4:
+            continue
+        mask = obj.get("mask")
+        if mask is not None:
+            masks.append(np.asarray(mask))
+
+    annotator = Annotator()
+    if len(masks) == len(predictions):
+        return annotator.annotate(im=im, detection_predictions=predictions, masks=masks)
+    return annotator.annotate(im=im, detection_predictions=predictions)
 
 
 class System2Perception:
@@ -134,8 +230,8 @@ class System2Perception:
         *,
         detection_threshold: float | None = None,
         settling_s: float | None = None,
-    ) -> tuple[np.ndarray, str]:
-        """Wait for mechanical/vision settling, then grab RGB + object list."""
+    ) -> PerceptionSnapshot:
+        """Wait for settling, grab RGB, filtered detections, annotated frame, and LLM scene text."""
         settle = float(settling_s if settling_s is not None else settling_s_default())
         if settle > 0:
             time.sleep(settle)
@@ -150,6 +246,7 @@ class System2Perception:
         if img is None:
             raise RuntimeError("Camera get_data() returned no RGB image (expected 'left' or 'rgb' key).")
 
+        rgb = np.asarray(img)
         thr = float(detection_threshold if detection_threshold is not None else self._default_detection_threshold)
         detected = self._perception.get_objects_infos(thr)
         scene = format_scene_for_llm(
@@ -157,4 +254,50 @@ class System2Perception:
             T_reachy_cam=self._T_reachy_cam,
             assume_poses_already_in_robot_frame=self._assume_robot,
         )
-        return np.asarray(img), scene
+        annotated_rgb = annotate_rgb(rgb, detected)
+        return PerceptionSnapshot(rgb=rgb, annotated_rgb=annotated_rgb, scene=scene, objects=list(detected))
+
+    def snapshot_until_tracked_objects(
+        self,
+        *,
+        labels: Sequence[str],
+        detection_threshold: float | None = None,
+        settling_s: float | None = None,
+        max_attempts: int | None = None,
+        require_every_label: bool = True,
+        retry_settling_s: float | None = None,
+    ) -> PerceptionSnapshot:
+        """Repeatedly grab frames until detections match ``labels``, or raise after ``max_attempts``.
+
+        Pollen's object filter often needs several ticks after ``start()`` before poses appear.
+        """
+        max_att = int(max_attempts if max_attempts is not None else perception_snapshot_max_attempts_default())
+        base_settle = float(settling_s if settling_s is not None else settling_s_default())
+        retry_settle = float(retry_settling_s if retry_settling_s is not None else perception_retry_settling_s_default())
+
+        last: PerceptionSnapshot | None = None
+        for attempt in range(1, max_att + 1):
+            settle = base_settle if attempt == 1 else retry_settle
+            snap = self.snapshot(detection_threshold=detection_threshold, settling_s=settle)
+            last = snap
+            if objects_satisfy_tracked_labels(snap.objects, labels, require_every_label=require_every_label):
+                if attempt > 1:
+                    logger.info("Perception criteria met after %s attempts (%s objects).", attempt, len(snap.objects))
+                return snap
+            logger.warning(
+                "Perception attempt %s/%s: %s objects (labels=%s, require_every_label=%s)",
+                attempt,
+                max_att,
+                len(snap.objects),
+                list(labels),
+                require_every_label,
+            )
+
+        assert last is not None
+        raise RuntimeError(
+            f"Perception did not satisfy criteria after {max_att} attempts "
+            f"(last snapshot had {len(last.objects)} objects). "
+            "Try lowering PERCEPTION_DETECTION_THRESHOLD, improving lighting, "
+            "renaming SYSTEM2_LABELS to match OWL-ViT, or raising SYSTEM2_SNAPSHOT_MAX_ATTEMPTS / "
+            "setting SYSTEM2_REQUIRE_ALL_LABELS=0 to require only any detection."
+        )
