@@ -54,10 +54,34 @@ Complete the TASK. JSON only."""
 )
 
 VERIFY_SYSTEM_PROMPT = (
-    """Check if the attempted subtask succeeded (BEFORE/AFTER images, PERCEPTION_AFTER).
+    """Check if the attempted subtask succeeded using BEFORE/AFTER images, PERCEPTION_AFTER, and SUBTASK_MODE.
+
+Judge only the stated subtask — not the whole task. Use SUBTASK_MODE criteria:
+- approach: TCP above object xy, gripper fingers-down (not horizontal). Do NOT require the object to be lifted.
+- grasp: manipulandum grasped or lifted; gripper closed on the object.
+- place: object over target container; gripper opened after release.
 
 Output only JSON:
-{"status": "OK"|"FAILED", "correction": null | {"description": "string", "actions": [/* ≤5 */]}}
+{"status": "OK"|"FAILED", "failure_reason": "short string or null", "correction": null | {"description": "string", "actions": [/* ≤5 */]}}
+
+Corrections must use full op names (e.g. r_arm_goto_pose, r_arm_translate, r_gripper_goto) — never "operation" or bare x/y/z.
+If FAILED and needs re-approach or full re-grasp sequence, set correction to null (recovery replan handles that).
+
+"""
+    + MOTION_OPS_FOR_LLM
+)
+
+REPLAN_AFTER_FAILURE_SYSTEM_PROMPT = (
+    """A subtask FAILED verification. Plan a minimal recovery for THAT subtask only — not the full pick-and-place.
+
+Output only JSON:
+{"subtasks": [{"description": "string", "actions": [/* 1-5 */]}]}
+- At most 2 subtasks total. Same op rules as planning (r_arm_goto_pose, r_gripper_goto, etc.).
+- Use PERCEPTION_AFTER for object xyz; ROBOT_STATE; SCENE_HINTS for z_high / z_pregrasp; rpy_deg [0,0,0].
+- Do NOT output lift + transit + approach + grasp + place as a new full plan.
+- grasp failure: at most re-approach (high + pre-grasp at pick xy) then one grasp attempt.
+- approach failure: at most 1-2 goto_pose fixes at pick xy (orientation / height).
+- place failure: at most reposition above bowl + one place/release attempt.
 
 """
     + MOTION_OPS_FOR_LLM

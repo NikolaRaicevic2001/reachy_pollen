@@ -15,6 +15,7 @@ from openai import OpenAI
 from reachy_system2.prompts import (
     LABELS_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT,
+    REPLAN_AFTER_FAILURE_SYSTEM_PROMPT,
     REPLAN_OOB_SYSTEM_PROMPT,
     VERIFY_SYSTEM_PROMPT,
 )
@@ -213,10 +214,14 @@ def _normalize_action_dict(action: Any, *, context: str, index: int) -> dict[str
         )
     out = dict(action)
     if "op" not in out:
-        for alias in ("type", "action", "name"):
+        for alias in ("type", "action", "name", "operation"):
             if alias in out and isinstance(out[alias], str):
                 out["op"] = out.pop(alias)
                 break
+    if "op" not in out and {"x", "y", "z"}.issubset(out.keys()):
+        out["op"] = "arm_translate"
+    if "op" not in out and ("xyz" in out or "rpy_deg" in out):
+        out["op"] = "arm_goto_pose"
     params = out.pop("parameters", None)
     if isinstance(params, dict):
         for key, val in params.items():
@@ -379,6 +384,7 @@ class ReasoningClient:
         subtask_description: str,
         scene_after: str,
         rgb_after: np.ndarray,
+        verification_mode: str = "grasp",
         rgb_before: np.ndarray | None = None,
         depth_viz_after: np.ndarray | None = None,
         depth_viz_before: np.ndarray | None = None,
@@ -386,6 +392,7 @@ class ReasoningClient:
         parts = [
             f"GOAL:\n{goal}\n",
             f"SUBTASK (just attempted):\n{subtask_description}\n",
+            f"SUBTASK_MODE: {verification_mode}\n",
             f"PERCEPTION_AFTER:\n{scene_after}\n",
         ]
         content: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(parts)}]
@@ -421,6 +428,9 @@ class ReasoningClient:
             raise ValueError("Verification JSON must include 'status'.")
         if data["status"] not in ("OK", "FAILED"):
             raise ValueError("Verification status must be OK or FAILED.")
+        reason = data.get("failure_reason")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("failure_reason must be a string or null.")
         corr = data.get("correction")
         if corr is not None:
             if not isinstance(corr, dict) or "actions" not in corr:
@@ -434,6 +444,57 @@ class ReasoningClient:
                 logger.warning("Dropping invalid verify correction (will not run on robot): %s", exc)
                 data["correction"] = None
         return data
+
+    def replan_after_failure(
+        self,
+        *,
+        task: str,
+        failed_subtask_description: str,
+        failed_subtask: dict[str, Any],
+        verification: dict[str, Any],
+        scene_description: str,
+        rgb: np.ndarray,
+        robot_context: str | None = None,
+        workspace_bounds: str | None = None,
+        scene_hints: str | None = None,
+        depth_viz_rgb: np.ndarray | None = None,
+        tracked_labels: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Recovery plan from post-failure perception (re-approach, re-grasp, etc.)."""
+        import json as _json
+
+        user_text = (
+            f"TASK:\n{task}\n\n"
+            f"FAILED_SUBTASK:\n{failed_subtask_description}\n\n"
+            f"FAILED_SUBTASK_JSON:\n{_json.dumps(failed_subtask, indent=2)}\n\n"
+            f"VERIFICATION:\n{_json.dumps(verification, indent=2)}\n\n"
+        )
+        if robot_context:
+            user_text += f"{robot_context}\n\n"
+        user_text += f"PERCEPTION_AFTER:\n{scene_description}\n"
+        if scene_hints:
+            user_text += f"\n{scene_hints}\n\n"
+        if workspace_bounds:
+            user_text += f"{workspace_bounds}\n\n"
+        if tracked_labels:
+            user_text += f"VISION_LABELS: {', '.join(tracked_labels)}\n"
+        content = _user_multimodal_rgb_depth(user_text, rgb, depth_viz_rgb)
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": REPLAN_AFTER_FAILURE_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.2,
+        )
+        if self._run_tracker is not None:
+            self._run_tracker.record_llm_response("replan_after_failure", self.model, resp)
+        raw = resp.choices[0].message.content or ""
+        data = _parse_llm_json(raw, context="replan_after_failure")
+        plan = _validate_plan_schema(data)
+        if len(plan["subtasks"]) > 2:
+            raise ValueError("Recovery replan must have at most 2 subtasks.")
+        return plan
 
     def replan_out_of_workspace(
         self,

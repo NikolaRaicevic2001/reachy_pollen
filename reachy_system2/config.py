@@ -94,3 +94,8 @@ def support_xy_radius_m_default() -> float:
 def hover_above_object_m_default() -> float:
     """Minimum z clearance above highest manipulandum centroid (+Z up)."""
     return _f("SYSTEM2_HOVER_ABOVE_OBJECT_M", 0.12)
+
+
+def verify_max_retries_default() -> int:
+    """After FAILED verification, how many failure-replan attempts per planned subtask."""
+    return _i("SYSTEM2_MAX_VERIFY_RETRIES", 2)
