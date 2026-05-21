@@ -368,7 +368,7 @@ lerobot-record \
   --robot.with_torso_camera=true \
   --robot.camera_width=640 \
   --robot.camera_height=480 \
-  --policy.path=erl-hub/reachy-groot-diffusion-ft-execute-pick-and-place \
+  --policy.path=erl-hub/reachy-smolvla-ft-execute-pick-and-place \
   --dataset.repo_id="erl-hub/eval_reachy-pick-and-place" \
   --dataset.root="outputs/reachy_local_test" \
   --dataset.single_task="Pick up the tomato soup can and place it into the metal bowl" \
