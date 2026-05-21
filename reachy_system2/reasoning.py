@@ -9,12 +9,11 @@ import os
 import re
 from typing import Any, Sequence
 
-import certifi
-import httpx
 import numpy as np
 from openai import OpenAI
 
 from reachy_system2.prompts import (
+    LABELS_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT,
     REPLAN_OOB_SYSTEM_PROMPT,
     VERIFY_SYSTEM_PROMPT,
@@ -38,6 +37,40 @@ _ALLOWED_ACTION_OPS = frozenset(
         "l_gripper_goto",
     }
 )
+
+# Shorthand ops models emit; mapped to r_* by default (override with action["arm"]="l").
+_OP_SHORTHAND_TO_SUFFIX: dict[str, str] = {
+    "goto_pose": "arm_goto_pose",
+    "arm_goto_pose": "arm_goto_pose",
+    "translate": "arm_translate",
+    "rotate": "arm_rotate",
+    "gripper_goto": "gripper_goto",
+    "gripper": "gripper_goto",
+}
+
+
+def _arm_prefix_from_action(action: dict[str, Any]) -> str:
+    hint = action.get("arm") or action.get("side") or action.get("arm_name")
+    if hint is None:
+        return "r"
+    s = str(hint).strip().lower()
+    if s in ("l", "left", "l_arm", "l_arm_goto_pose"):
+        return "l"
+    return "r"
+
+
+def _canonicalize_op_name(op: str, action: dict[str, Any]) -> str:
+    """Map generic op names (e.g. ``goto_pose``) to ``r_arm_goto_pose`` / ``l_arm_goto_pose``."""
+    if op in _ALLOWED_ACTION_OPS:
+        return op
+    suffix = _OP_SHORTHAND_TO_SUFFIX.get(op)
+    if suffix is not None:
+        prefix = _arm_prefix_from_action(action)
+        canonical = f"{prefix}_{suffix}"
+        if canonical in _ALLOWED_ACTION_OPS:
+            logger.debug("Mapped op %r -> %r", op, canonical)
+            return canonical
+    return op
 
 
 def _strip_json_fence(text: str) -> str:
@@ -141,32 +174,93 @@ def _encode_image_jpeg_b64(rgb: np.ndarray) -> str:
     return base64.standard_b64encode(buf.tobytes()).decode("ascii")
 
 
-def _user_multimodal_text_image(text: str, rgb: np.ndarray) -> list[dict[str, Any]]:
-    b64 = _encode_image_jpeg_b64(rgb)
-    return [
-        {"type": "text", "text": text},
+_DEPTH_IMAGE_CAPTION = (
+    "DEPTH_IMAGE (torso camera, TURBO colormap aligned to RGB: warm=nearer, cool=farther, "
+    "black=no reading). Use with PERCEPTION for table height, surfaces, and approach clearance."
+)
+
+
+def _user_multimodal_rgb_depth(
+    text: str,
+    rgb: np.ndarray,
+    depth_viz_rgb: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    content.append({"type": "text", "text": "RGB_IMAGE (torso camera):"})
+    content.append(
         {
             "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            "image_url": {"url": f"data:image/jpeg;base64,{_encode_image_jpeg_b64(rgb)}"},
         },
-    ]
+    )
+    if depth_viz_rgb is not None:
+        content.append({"type": "text", "text": _DEPTH_IMAGE_CAPTION})
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{_encode_image_jpeg_b64(depth_viz_rgb)}"},
+            },
+        )
+    return content
 
 
-def _validate_actions_list(actions: Any, *, context: str) -> None:
-    """Ensure executor-compatible ``{"op": ...}`` actions."""
+def _normalize_action_dict(action: Any, *, context: str, index: int) -> dict[str, Any]:
+    """Flatten common LLM variants to executor shape: ``{"op": "...", ...}``."""
+    if not isinstance(action, dict):
+        raise ValueError(
+            f"{context}: action {index} must be a JSON object with key \"op\", "
+            f"got {type(action).__name__}."
+        )
+    out = dict(action)
+    if "op" not in out:
+        for alias in ("type", "action", "name"):
+            if alias in out and isinstance(out[alias], str):
+                out["op"] = out.pop(alias)
+                break
+    params = out.pop("parameters", None)
+    if isinstance(params, dict):
+        for key, val in params.items():
+            out.setdefault(key, val)
+    if "op" not in out:
+        raise ValueError(
+            f'{context}: action {index} must include top-level "op" '
+            f'(not "type" or nested "parameters" only). Keys seen: {sorted(out)}.'
+        )
+    out["op"] = _canonicalize_op_name(str(out["op"]), out)
+    return out
+
+
+def _validate_actions_list(actions: Any, *, context: str) -> list[dict[str, Any]]:
+    """Ensure executor-compatible ``{"op": ...}`` actions; return normalized list."""
     if not isinstance(actions, list) or not actions:
         raise ValueError(f"{context}: actions must be a non-empty list.")
     if len(actions) > _MAX_ACTIONS:
         raise ValueError(f"{context}: at most {_MAX_ACTIONS} actions.")
-    for i, a in enumerate(actions):
-        if not isinstance(a, dict) or "op" not in a:
-            raise ValueError(f'{context}: action {i} must be an object with an "op" field.')
+    normalized: list[dict[str, Any]] = []
+    for i, raw in enumerate(actions):
+        a = _normalize_action_dict(raw, context=context, index=i)
         op = a["op"]
         if op not in _ALLOWED_ACTION_OPS:
             raise ValueError(
                 f"{context}: unknown op {op!r} in action {i}. "
                 f"Use only: {', '.join(sorted(_ALLOWED_ACTION_OPS))}."
             )
+        normalized.append(a)
+    return normalized
+
+
+def _validate_labels_schema(data: Any) -> list[str]:
+    if not isinstance(data, dict) or "labels" not in data:
+        raise ValueError('Label JSON must be {"labels": ["...", ...]}.')
+    raw = data["labels"]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('"labels" must be a non-empty list of strings.')
+    out = [str(x).strip() for x in raw if str(x).strip()]
+    if not out:
+        raise ValueError('"labels" must contain at least one non-empty string.')
+    if len(out) > 12:
+        raise ValueError("At most 12 labels allowed.")
+    return out
 
 
 def _validate_plan_schema(plan: Any) -> dict[str, Any]:
@@ -177,8 +271,8 @@ def _validate_plan_schema(plan: Any) -> dict[str, Any]:
         raise ValueError("'subtasks' must be a non-empty list.")
     if len(subs) > _MAX_SUBTASKS:
         raise ValueError(
-            f"Too many subtasks ({len(subs)} > {_MAX_SUBTASKS}). Merge phases: prefer ~4–6 subtasks "
-            "with 2–5 actions each instead of many single-action subtasks."
+            f"Too many subtasks ({len(subs)} > {_MAX_SUBTASKS}). "
+            "Combine related motions into fewer subtasks with multiple actions each."
         )
     for si, s in enumerate(subs):
         if not isinstance(s, dict):
@@ -190,7 +284,7 @@ def _validate_plan_schema(plan: Any) -> dict[str, Any]:
             raise ValueError("Each subtask needs a non-empty 'actions' list.")
         if len(acts) > _MAX_ACTIONS:
             raise ValueError(f"Each subtask allows at most {_MAX_ACTIONS} actions.")
-        _validate_actions_list(acts, context=f"subtasks[{si}]")
+        s["actions"] = _validate_actions_list(acts, context=f"subtasks[{si}]")
     return plan
 
 
@@ -205,11 +299,30 @@ class ReasoningClient:
             raise RuntimeError("OPENAI_API_KEY is not set (add it to repo-root .env).")
         self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o")
         self._run_tracker = run_tracker
-        _base = (os.environ.get("OPENAI_BASE_URL") or "").strip() or None
-        # certifi CA bundle: avoids SSL: CERTIFICATE_VERIFY_FAILED on some Windows/Python installs
-        # where the default trust store is incomplete (SSL_CERT_FILE alone may not reach httpx).
-        _http = httpx.Client(verify=certifi.where(), timeout=60.0)
-        self._client = OpenAI(http_client=_http, base_url=_base) if _base else OpenAI(http_client=_http)
+        self._client = OpenAI(timeout=60.0)
+
+    def infer_tracked_labels(self, task: str, rgb: np.ndarray | None = None) -> list[str]:
+        """Derive OWL-ViT / Perception label strings from the natural-language task (before detection)."""
+        user_text = f"TASK:\n{task}\n"
+        if rgb is not None:
+            content: list[dict[str, Any]] | str = _user_multimodal_rgb_depth(user_text, rgb)
+        else:
+            content = user_text
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": LABELS_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.0,
+        )
+        if self._run_tracker is not None:
+            self._run_tracker.record_llm_response("infer_tracked_labels", self.model, resp)
+        raw = resp.choices[0].message.content or ""
+        data = _parse_llm_json(raw, context="infer_tracked_labels")
+        labels = _validate_labels_schema(data)
+        logger.info("Inferred labels: %s", labels)
+        return labels
 
     def generate_plan(
         self,
@@ -217,31 +330,23 @@ class ReasoningClient:
         scene_description: str,
         rgb: np.ndarray,
         *,
+        depth_viz_rgb: np.ndarray | None = None,
         tracked_labels: Sequence[str] | None = None,
         robot_context: str | None = None,
+        workspace_bounds: str | None = None,
+        scene_hints: str | None = None,
     ) -> dict[str, Any]:
-        extras: list[str] = []
-        if tracked_labels:
-            extras.append(
-                "TRACKED_LABELS (vision system): " + ", ".join(str(x) for x in tracked_labels)
-            )
-        has_object_lines = any(
-            ln.strip().startswith("- ") and ": x=" in ln for ln in scene_description.splitlines()
-        )
-        if "(none above threshold)" in scene_description or not has_object_lines:
-            extras.append(
-                "NOTE: No usable 3D object lines are in PERCEPTION. Ground yourself in the RGB image. "
-                "You MUST output ONLY valid JSON as specified — no questions, no prose outside JSON. "
-                "Propose conservative Cartesian targets consistent with the workspace."
-            )
-        extra_block = ("\n".join(extras) + "\n") if extras else ""
-        user_text = f"TASK:\n{task}\n\nPERCEPTION:\n{scene_description}\n"
+        user_text = f"TASK:\n{task}\n\n"
         if robot_context:
-            user_text += f"\n{robot_context}\n"
-        if extra_block:
-            user_text += "\n" + extra_block
-        user_text += "\nHint: few subtasks, 2–5 ops each.\n"
-        content = _user_multimodal_text_image(user_text, rgb)
+            user_text += f"{robot_context}\n\n"
+        user_text += f"PERCEPTION:\n{scene_description}\n"
+        if scene_hints:
+            user_text += f"\n{scene_hints}\n"
+        if workspace_bounds:
+            user_text += f"\n{workspace_bounds}\n"
+        if tracked_labels:
+            user_text += f"\nVISION_LABELS: {', '.join(str(x) for x in tracked_labels)}\n"
+        content = _user_multimodal_rgb_depth(user_text, rgb, depth_viz_rgb)
         resp = self._client.chat.completions.create(
             model=self.model,
             messages=[
@@ -275,6 +380,8 @@ class ReasoningClient:
         scene_after: str,
         rgb_after: np.ndarray,
         rgb_before: np.ndarray | None = None,
+        depth_viz_after: np.ndarray | None = None,
+        depth_viz_before: np.ndarray | None = None,
     ) -> dict[str, Any]:
         parts = [
             f"GOAL:\n{goal}\n",
@@ -283,21 +390,19 @@ class ReasoningClient:
         ]
         content: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(parts)}]
         if rgb_before is not None:
-            content.append({"type": "text", "text": "IMAGE_BEFORE (before subtask):"})
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{_encode_image_jpeg_b64(rgb_before)}"
-                    },
-                }
+            content.extend(
+                _user_multimodal_rgb_depth(
+                    "BEFORE subtask (RGB + depth):",
+                    rgb_before,
+                    depth_viz_before,
+                )[1:]
             )
-        content.append({"type": "text", "text": "IMAGE_AFTER (after subtask):"})
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{_encode_image_jpeg_b64(rgb_after)}"},
-            },
+        content.extend(
+            _user_multimodal_rgb_depth(
+                "AFTER subtask (RGB + depth):",
+                rgb_after,
+                depth_viz_after,
+            )[1:]
         )
 
         resp = self._client.chat.completions.create(
@@ -323,7 +428,11 @@ class ReasoningClient:
             acts = corr["actions"]
             if not isinstance(acts, list) or len(acts) > _MAX_ACTIONS:
                 raise ValueError(f"correction.actions must be a list of at most {_MAX_ACTIONS} items.")
-            _validate_actions_list(acts, context="verify_execution.correction")
+            try:
+                corr["actions"] = _validate_actions_list(acts, context="verify_execution.correction")
+            except ValueError as exc:
+                logger.warning("Dropping invalid verify correction (will not run on robot): %s", exc)
+                data["correction"] = None
         return data
 
     def replan_out_of_workspace(
@@ -335,17 +444,21 @@ class ReasoningClient:
         rejected_xyz: tuple[float, float, float],
         bounds: dict[str, float],
         robot_context: str | None = None,
+        depth_viz_rgb: np.ndarray | None = None,
+        scene_hints: str | None = None,
     ) -> dict[str, Any]:
-        user_text = (
-            f"GOAL:\n{task}\n\nPERCEPTION:\n{scene_description}\n\n"
+        user_text = f"TASK:\n{task}\n\n"
+        if robot_context:
+            user_text += f"{robot_context}\n\n"
+        user_text += f"PERCEPTION:\n{scene_description}\n"
+        if scene_hints:
+            user_text += f"\n{scene_hints}\n\n"
+        user_text += (
             f"REJECTED_TARGET_XYZ (robot frame, meters): {list(rejected_xyz)}\n"
             f"ALLOWED_AXIS_ALIGNED_BOX: xmin={bounds['xmin']}, xmax={bounds['xmax']}, "
             f"ymin={bounds['ymin']}, ymax={bounds['ymax']}, zmin={bounds['zmin']}, zmax={bounds['zmax']}\n"
         )
-        if robot_context:
-            user_text += f"\n{robot_context}\n"
-        user_text += "\nHint: few subtasks, bundle ops.\n"
-        content = _user_multimodal_text_image(user_text, rgb)
+        content = _user_multimodal_rgb_depth(user_text, rgb, depth_viz_rgb)
         resp = self._client.chat.completions.create(
             model=self.model,
             messages=[

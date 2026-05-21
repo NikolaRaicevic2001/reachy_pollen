@@ -1,42 +1,74 @@
 """System prompts for planning, verification, and out-of-workspace replanning."""
 
-PLAN_SYSTEM_PROMPT = """Reachy 2 planner: output **only** valid JSON (no markdown, no prose).
+from reachy_system2.motion_ops import MOTION_OPS_FOR_LLM
 
-Frames (meters, robot base): +X forward, +Y robot LEFT, +Z up. PERCEPTION / ROBOT_STATE use this frame; prefer PERCEPTION numbers over guessing from RGB.
+LABELS_SYSTEM_PROMPT = """From the TASK, list short noun phrases for vision tracking (OWL-ViT).
 
-Safety & structure
-- Avoid table/scene collisions: don't drive horizontally through tabletop height to reach a goal; use cleared waypoints (raise z / offset xy), then descend to grasp.
-- Few subtasks (~4-6 typical pick-place), **not** one primitive per subtask. Pack **2-5** `{"op":…}` actions per subtask; separate subtasks only on major phases (approach→grasp, transport, place).
-
-Empty perception ("none above threshold"): still emit JSON; ground on RGB; conservative poses.
-
-Schema:
-{"subtasks":[{"description":"string","actions":[/* ≤5 dicts, each has "op" */]}]}
-
-Allowed `op` (numbers are JSON numbers; include required fields):
-- `r_arm_goto_pose` | `l_arm_goto_pose`: `xyz`, `rpy_deg`, `duration` — Cartesian target (minimum-jerk).
-- `r_arm_translate` | `l_arm_translate`: `x`,`y`,`z`,`frame` (e.g. `"robot"`).
-- `r_arm_rotate` | `l_arm_rotate`: `roll`,`pitch`,`yaw`,`frame` (often `"gripper"`).
-- `r_gripper_goto` | `l_gripper_goto`: `position` 0=closed..100=open, `duration`.
-
-No other ops or keys. No questions to the user — always a complete plan JSON.
-"""
-
-
-VERIFY_SYSTEM_PROMPT = """Judge subtask success from AFTER (+ optional BEFORE) images and PERCEPTION_AFTER text.
-
-Output **only** JSON:
-{"status":"OK"|"FAILED","correction":null|{"description":"…","actions":[/* ≤5 planning-style actions */]}}
+Output only JSON: {"labels": ["...", "..."]}
 
 Rules
-- `correction.actions` must mirror planning: each item is `{"op":"…", …}` with **only** the ops allowed in planning (`r_arm_goto_pose`, `l_arm_goto_pose`, `r_arm_translate`, `l_arm_translate`, `r_arm_rotate`, `l_arm_rotate`, `r_gripper_goto`, `l_gripper_goto`). Never `"type"` / `"parameters"` / other shapes.
-- Prefer **one** correction with **several** small collision-safe steps (table-aware).
-- If FAILED but no safe scripted fix, set `correction` to null.
+- 1-8 simple phrases the detector can match.
+- Include task objects and fixed scene elements (e.g. table).
+- Exclude the robot."""
+
+PLAN_SYSTEM_PROMPT = (
+    """You plan motion for a Reachy 2 robot. Output only valid JSON (no markdown).
+
+Coordinate frame (robot base, meters): +X forward, +Y robot left, +Z up.
+
+OUTPUT (strict)
+{"subtasks": [{"description": "string", "actions": [/* 1-5 actions */]}]}
+- Use full op names (e.g. r_arm_goto_pose). Flat actions only; required field "op".
+- Group related steps in one subtask (several actions), not one tiny action per subtask.
+- Typical pick-and-place: about 5-7 subtasks. Never skip the mandatory opening steps in SCENE_HINTS.
+
+USER MESSAGE INPUTS (use all of these — do not invent poses without them)
+- TASK — goal for this run.
+- ROBOT_STATE — both arms: TCP xyz; rpy_deg is FK readback only (not for goto_pose).
+- PERCEPTION — object poses in robot frame (primary source for pick/place xyz).
+- VISION_LABELS — detection phrases.
+- RGB_IMAGE — scene layout, obstacles, which arm side to use.
+- DEPTH_IMAGE — relative distances and clearances.
+- SCENE_HINTS — transit/pre-grasp z levels and top-down rpy [0, 0, 0].
+- SAFE_WORKSPACE — xyz limits for goto_pose.
+
 """
+    + MOTION_OPS_FOR_LLM
+    + """
 
+PLANNING
+- Derive xyz from PERCEPTION, images, ROBOT_STATE, and SCENE_HINTS. No invented poses.
+- Top-down: rpy_deg [0, 0, 0] on every goto_pose. Do not copy ROBOT_STATE rpy. Do not use pitch ≈ -90°.
+- goto_pose moves in a straight line in (xyz, rpy). Never combine a large z change with a large xy change in one action (scrapes the table).
 
-REPLAN_OOB_SYSTEM_PROMPT = """Prior Cartesian target was **outside** the allowed workspace box.
+MANDATORY ORDER (SCENE_HINTS lists exact numbers — follow before any move toward the pick target):
+1. First subtask — Lift only: at step-1 xyz (current arm TCP xy, z = z_high). Same x and y as ROBOT_STATE for the working arm; only z increases.
+2. Second subtask — Transit only: at step-2 xyz (pick target x,y from PERCEPTION, z = z_high). xy changes, z stays at z_high.
+3. Third subtask — Approach pick: at pick xy, two goto_pose actions — (a) z = z_high, (b) z = z_pregrasp. Both [0, 0, 0].
+4. Grasp: descend to grasp z at pick xy, then close gripper.
+5. Place path: lift to z_high at pick xy → transit at z_high to bowl xy → approach (z_high then z_pregrasp) → descend and open gripper.
 
-Reply **only** with planning-shaped JSON: `{"subtasks":[{"description":"…","actions":[…]}]}` — each action `{"op":…}` as in planning, ≤5 actions per subtask.
+Do not start the plan with a move to the object. Do not go straight to the can/bowl from the home pose.
 
-Return a **minimal** fix: adjusted poses inside the box, same task intent. Prefer **one** subtask bundling a few small `goto_pose` / `translate` moves."""
+Complete the TASK. JSON only."""
+)
+
+VERIFY_SYSTEM_PROMPT = (
+    """Check if the attempted subtask succeeded (BEFORE/AFTER images, PERCEPTION_AFTER).
+
+Output only JSON:
+{"status": "OK"|"FAILED", "correction": null | {"description": "string", "actions": [/* ≤5 */]}}
+
+"""
+    + MOTION_OPS_FOR_LLM
+)
+
+REPLAN_OOB_SYSTEM_PROMPT = (
+    """goto_pose was outside SAFE_WORKSPACE. Output only JSON:
+{"subtasks": [{"description": "string", "actions": [/* ≤5 */]}]}
+
+Minimal in-box fix; same output rules as planning.
+
+"""
+    + MOTION_OPS_FOR_LLM
+)

@@ -30,6 +30,7 @@ class PerceptionSnapshot:
     annotated_rgb: np.ndarray
     scene: str
     objects: list[dict[str, Any]]
+    depth_viz_rgb: np.ndarray | None = None
 
 
 def to_robot_frame(T_reachy_cam: np.ndarray, pose_cam: np.ndarray) -> np.ndarray:
@@ -96,24 +97,37 @@ def label_matches_tracked(label: str, object_name: str) -> bool:
     return a in b or b in a
 
 
+def _object_names(objects: Sequence[dict[str, Any]]) -> list[str]:
+    return [str(o.get("name", "")) for o in objects]
+
+
+def _unique_detection_names(objects: Sequence[dict[str, Any]]) -> list[str]:
+    seen: list[str] = []
+    for n in _object_names(objects):
+        if n and n not in seen:
+            seen.append(n)
+    return seen
+
+
+def missing_tracked_labels(
+    objects: Sequence[dict[str, Any]],
+    labels: Sequence[str],
+) -> list[str]:
+    """Labels with no loose match to any filtered detection name."""
+    names = _object_names(objects)
+    return [lab for lab in labels if not any(label_matches_tracked(lab, n) for n in names)]
+
+
 def objects_satisfy_tracked_labels(
     objects: Sequence[dict[str, Any]],
     labels: Sequence[str],
-    *,
-    require_every_label: bool,
 ) -> bool:
-    """Whether filtered perception objects are enough to plan."""
+    """Whether each tracked label matches at least one detected object name (not object count)."""
     if not objects:
         return False
     if not labels:
         return True
-    names = [str(o.get("name", "")) for o in objects]
-    if not require_every_label:
-        return any(n.strip() for n in names)
-    for lab in labels:
-        if not any(label_matches_tracked(lab, n) for n in names):
-            return False
-    return True
+    return not missing_tracked_labels(objects, labels)
 
 
 def _detection_predictions_from_objects(
@@ -134,6 +148,43 @@ def _detection_predictions_from_objects(
             }
         )
     return predictions
+
+
+def depth_to_viz_rgb(
+    depth: np.ndarray,
+    *,
+    target_hw: tuple[int, int] | None = None,
+    max_range_m: float = 2.0,
+) -> np.ndarray:
+    """Encode torso depth as a pseudo-RGB colormap for vision LLMs (same viewpoint as RGB)."""
+    import cv2
+
+    d = np.asarray(depth, dtype=np.float32).squeeze()
+    if d.ndim != 2:
+        raise ValueError(f"Expected HxW depth, got shape {d.shape}")
+
+    valid = d > 0
+    if not np.any(valid):
+        out = np.zeros((d.shape[0], d.shape[1], 3), dtype=np.uint8)
+    else:
+        d_m = d.copy()
+        if float(np.nanmax(d_m[valid])) > 50.0:
+            d_m = d_m / 1000.0
+        d_valid = d_m[valid]
+        near = float(np.percentile(d_valid, 5))
+        far = float(np.percentile(d_valid, 95))
+        span = max(far - near, 1e-3)
+        far = min(far, near + max_range_m)
+        norm = np.zeros(d.shape, dtype=np.uint8)
+        t = np.clip((d_m[valid] - near) / span, 0.0, 1.0)
+        norm[valid] = (255.0 * (1.0 - t)).astype(np.uint8)
+        colored_bgr = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
+        colored_bgr[~valid] = 0
+        out = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+
+    if target_hw is not None and (out.shape[0], out.shape[1]) != target_hw:
+        out = cv2.resize(out, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_NEAREST)
+    return out
 
 
 def annotate_rgb(rgb: np.ndarray, detected_objects: Sequence[dict[str, Any]]) -> np.ndarray:
@@ -237,16 +288,28 @@ class System2Perception:
             time.sleep(settle)
 
         data, _, _ = self._r_cam.get_data()
+        depth_raw = None
         if isinstance(data, dict):
             img = data.get("left")
             if img is None:
                 img = data.get("rgb")
+            depth_raw = data.get("depth")
         else:
             img = data
         if img is None:
             raise RuntimeError("Camera get_data() returned no RGB image (expected 'left' or 'rgb' key).")
 
         rgb = np.asarray(img)
+        depth_viz_rgb = None
+        if depth_raw is not None:
+            try:
+                depth_viz_rgb = depth_to_viz_rgb(
+                    depth_raw,
+                    target_hw=(rgb.shape[0], rgb.shape[1]),
+                )
+            except Exception as exc:
+                logger.warning("Depth colormap failed (LLM will get RGB only): %s", exc)
+
         thr = float(detection_threshold if detection_threshold is not None else self._default_detection_threshold)
         detected = self._perception.get_objects_infos(thr)
         scene = format_scene_for_llm(
@@ -255,7 +318,13 @@ class System2Perception:
             assume_poses_already_in_robot_frame=self._assume_robot,
         )
         annotated_rgb = annotate_rgb(rgb, detected)
-        return PerceptionSnapshot(rgb=rgb, annotated_rgb=annotated_rgb, scene=scene, objects=list(detected))
+        return PerceptionSnapshot(
+            rgb=rgb,
+            annotated_rgb=annotated_rgb,
+            scene=scene,
+            objects=list(detected),
+            depth_viz_rgb=depth_viz_rgb,
+        )
 
     def snapshot_until_tracked_objects(
         self,
@@ -264,7 +333,6 @@ class System2Perception:
         detection_threshold: float | None = None,
         settling_s: float | None = None,
         max_attempts: int | None = None,
-        require_every_label: bool = True,
         retry_settling_s: float | None = None,
     ) -> PerceptionSnapshot:
         """Repeatedly grab frames until detections match ``labels``, or raise after ``max_attempts``.
@@ -280,24 +348,29 @@ class System2Perception:
             settle = base_settle if attempt == 1 else retry_settle
             snap = self.snapshot(detection_threshold=detection_threshold, settling_s=settle)
             last = snap
-            if objects_satisfy_tracked_labels(snap.objects, labels, require_every_label=require_every_label):
+            if objects_satisfy_tracked_labels(snap.objects, labels):
                 if attempt > 1:
                     logger.info("Perception criteria met after %s attempts (%s objects).", attempt, len(snap.objects))
                 return snap
+            missing = missing_tracked_labels(snap.objects, labels)
             logger.warning(
-                "Perception attempt %s/%s: %s objects (labels=%s, require_every_label=%s)",
+                "Perception attempt %s/%s: %s filtered objects, detection names=%s, "
+                "tracked labels=%s, missing label match=%s",
                 attempt,
                 max_att,
                 len(snap.objects),
+                _unique_detection_names(snap.objects),
                 list(labels),
-                require_every_label,
+                missing,
             )
 
         assert last is not None
+        missing = missing_tracked_labels(last.objects, labels)
         raise RuntimeError(
-            f"Perception did not satisfy criteria after {max_att} attempts "
-            f"(last snapshot had {len(last.objects)} objects). "
-            "Try lowering PERCEPTION_DETECTION_THRESHOLD, improving lighting, "
-            "renaming SYSTEM2_LABELS to match OWL-ViT, or raising SYSTEM2_SNAPSHOT_MAX_ATTEMPTS / "
-            "setting SYSTEM2_REQUIRE_ALL_LABELS=0 to require only any detection."
+            f"Perception did not satisfy criteria after {max_att} attempts: "
+            f"each tracked label must match a detection name (loose substring), not merely N objects. "
+            f"Last snapshot: {len(last.objects)} object(s), names={_unique_detection_names(last.objects)!r}, "
+            f"labels={list(labels)!r}, no match for {missing!r}. "
+            "Try lowering PERCEPTION_DETECTION_THRESHOLD, renaming labels to match OWL-ViT output, "
+            "or raising SYSTEM2_SNAPSHOT_MAX_ATTEMPTS."
         )

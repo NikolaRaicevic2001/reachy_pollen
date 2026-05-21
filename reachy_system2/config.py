@@ -32,12 +32,13 @@ class SafeWorkspace:
     @classmethod
     def from_env(cls) -> SafeWorkspace:
         return cls(
-            xmin=_f("SAFE_WORKSPACE_XMIN", 0.1),
-            xmax=_f("SAFE_WORKSPACE_XMAX", 0.8),
-            ymin=_f("SAFE_WORKSPACE_YMIN", -0.6),
-            ymax=_f("SAFE_WORKSPACE_YMAX", 0.6),
-            zmin=_f("SAFE_WORKSPACE_ZMIN", -0.5),
-            zmax=_f("SAFE_WORKSPACE_ZMAX", 0.5),
+            # +X forward: allow negative xmin so the arm can retract backward (away from table).
+            xmin=_f("SAFE_WORKSPACE_XMIN", -0.20),
+            xmax=_f("SAFE_WORKSPACE_XMAX", 0.85),
+            ymin=_f("SAFE_WORKSPACE_YMIN", -0.65),
+            ymax=_f("SAFE_WORKSPACE_YMAX", 0.65),
+            zmin=_f("SAFE_WORKSPACE_ZMIN", -0.55),
+            zmax=_f("SAFE_WORKSPACE_ZMAX", 0.55),
         )
 
     def contains(self, x: float, y: float, z: float) -> bool:
@@ -70,7 +71,26 @@ def perception_retry_settling_s_default() -> float:
     return _f("PERCEPTION_RETRY_SETTLING_S", 0.5)
 
 
-def require_every_tracked_label_default() -> bool:
-    """If true, planning waits until each SYSTEM2_LABELS entry matches some detection."""
-    raw = (os.environ.get("SYSTEM2_REQUIRE_ALL_LABELS") or "1").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+def clearance_margin_m_default() -> float:
+    """Meters above highest support surface z for transit waypoints."""
+    return _f("SYSTEM2_CLEARANCE_MARGIN_M", 0.15)
+
+
+def min_lift_above_tcp_m_default() -> float:
+    """Minimum vertical rise from current TCP z when computing z_safe."""
+    return _f("SYSTEM2_MIN_LIFT_ABOVE_TCP_M", 0.12)
+
+
+def link_clearance_m_default() -> float:
+    """Extra z above support+margin for arm links hanging below the TCP."""
+    return _f("SYSTEM2_LINK_CLEARANCE_M", 0.10)
+
+
+def support_xy_radius_m_default() -> float:
+    """Ignore support fixtures farther than this (xy) from manipulandum cluster."""
+    return _f("SYSTEM2_SUPPORT_XY_RADIUS_M", 0.70)
+
+
+def hover_above_object_m_default() -> float:
+    """Minimum z clearance above highest manipulandum centroid (+Z up)."""
+    return _f("SYSTEM2_HOVER_ABOVE_OBJECT_M", 0.12)

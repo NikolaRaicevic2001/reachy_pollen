@@ -14,13 +14,16 @@ from dotenv import load_dotenv
 from reachy_system2.config import (
     SafeWorkspace,
     perception_snapshot_max_attempts_default,
-    require_every_tracked_label_default,
     settling_s_default,
 )
 from reachy_system2.executor import ActionExecutor
 from reachy_system2.perception import System2Perception
 from reachy_system2.reasoning import ReasoningClient
-from reachy_system2.robot_context import format_end_effector_context_for_llm
+from reachy_system2.robot_context import (
+    format_end_effector_context_for_llm,
+    format_scene_hints_for_llm,
+    format_workspace_bounds_for_llm,
+)
 from reachy_system2.run_tracker import RunTracker, log_runs_enabled
 
 logger = logging.getLogger(__name__)
@@ -61,7 +64,7 @@ def run_closed_loop(
     *,
     reachy,
     task: str,
-    labels: list[str],
+    labels: list[str] | None = None,
     detection_threshold: float | None = None,
     settling_s: float | None = None,
     confirm_steps: bool = True,
@@ -72,7 +75,6 @@ def run_closed_loop(
     run_tracker: RunTracker | None = None,
     robot_host: str | None = None,
     perception_max_attempts: int | None = None,
-    require_every_tracked_label: bool | None = None,
 ) -> None:
     """Run perception → plan → execute → verify loop (used by CLI and notebook)."""
     settling = float(settling_s if settling_s is not None else settling_s_default())
@@ -89,14 +91,26 @@ def run_closed_loop(
     run_status = "ok"
     run_error: str | None = None
 
-    perception.set_tracked_labels(labels)
+    resolved_labels = [s.strip() for s in (labels or []) if s.strip()]
+    labels_from_env = bool(resolved_labels)
+    if not resolved_labels:
+        logger.info("No labels provided — inferring from task via LLM.")
+        resolved_labels = reasoning.infer_tracked_labels(task)
+        if tracker is not None:
+            tracker.write_json(
+                "labels.json",
+                {"labels": resolved_labels, "source": "llm"},
+            )
+
+    perception.set_tracked_labels(resolved_labels)
     perception.start(visualize=False)
     try:
         if tracker is not None:
             tracker.write_run_meta(
                 {
                     "task": task,
-                    "labels": labels,
+                    "labels": resolved_labels,
+                    "labels_source": "env" if labels_from_env else "llm",
                     "model": reasoning.model,
                     "dry_run": dry_run,
                     "confirm_steps": confirm_steps,
@@ -106,9 +120,6 @@ def run_closed_loop(
                     "perception_max_attempts": perception_max_attempts
                     if perception_max_attempts is not None
                     else perception_snapshot_max_attempts_default(),
-                    "require_every_tracked_label": require_every_tracked_label
-                    if require_every_tracked_label is not None
-                    else require_every_tracked_label_default(),
                 }
             )
 
@@ -117,33 +128,34 @@ def run_closed_loop(
             if perception_max_attempts is not None
             else perception_snapshot_max_attempts_default()
         )
-        req_all_labels = (
-            require_every_tracked_label
-            if require_every_tracked_label is not None
-            else require_every_tracked_label_default()
-        )
 
         snap = perception.snapshot_until_tracked_objects(
-            labels=labels,
+            labels=resolved_labels,
             detection_threshold=detection_threshold,
             settling_s=settling,
             max_attempts=max_att,
-            require_every_label=req_all_labels,
         )
-        rgb, scene = snap.rgb, snap.scene
+        rgb, scene, depth_viz = snap.rgb, snap.scene, snap.depth_viz_rgb
         if tracker is not None:
             tracker.write_text_file("perception_initial.txt", scene)
 
         ee_context = format_end_effector_context_for_llm(reachy)
+        workspace_bounds = format_workspace_bounds_for_llm(workspace)
+        scene_hints = format_scene_hints_for_llm(scene, ee_context)
         if tracker is not None:
             tracker.write_text_file("robot_context_initial.txt", ee_context)
+            tracker.write_text_file("workspace_bounds.txt", workspace_bounds)
+            tracker.write_text_file("scene_hints.txt", scene_hints)
 
         plan = reasoning.generate_plan(
             task,
             scene,
             rgb,
-            tracked_labels=labels,
+            depth_viz_rgb=depth_viz,
+            tracked_labels=resolved_labels,
             robot_context=ee_context,
+            workspace_bounds=workspace_bounds,
+            scene_hints=scene_hints,
         )
         logger.info("Plan: %s", json.dumps(plan, indent=2)[:8000])
         if tracker is not None:
@@ -181,13 +193,16 @@ def run_closed_loop(
                     "zmax": workspace.zmax,
                 }
                 ee_ctx = format_end_effector_context_for_llm(reachy)
+                hints = format_scene_hints_for_llm(scene, ee_ctx)
                 replan = reasoning.replan_out_of_workspace(
                     task=task,
                     scene_description=scene,
                     rgb=rgb,
+                    depth_viz_rgb=depth_viz,
                     rejected_xyz=validate.rejected_xyz or (0.0, 0.0, 0.0),
                     bounds=bounds,
                     robot_context=ee_ctx,
+                    scene_hints=hints,
                 )
                 if not replan["subtasks"]:
                     raise RuntimeError("Replan returned no subtasks.")
@@ -201,19 +216,24 @@ def run_closed_loop(
                 detection_threshold=detection_threshold,
                 settling_s=settling,
             )
-            rgb_after, scene_after = snap_after.rgb, snap_after.scene
+            rgb_after = snap_after.rgb
+            scene_after = snap_after.scene
+            depth_viz_after = snap_after.depth_viz_rgb
             verdict = reasoning.verify_execution(
                 goal=task,
                 subtask_description=str(current.get("description", "")),
                 scene_after=scene_after,
                 rgb_after=rgb_after,
                 rgb_before=rgb,
+                depth_viz_after=depth_viz_after,
+                depth_viz_before=depth_viz,
             )
             logger.info("Verification: %s", verdict)
             if tracker is not None:
                 tracker.write_json(f"verify_subtask_{i:03d}.json", verdict)
             rgb = rgb_after
             scene = scene_after
+            depth_viz = depth_viz_after
 
             if verdict.get("status") != "OK":
                 corr = verdict.get("correction")
@@ -247,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--labels",
         default=os.environ.get("SYSTEM2_LABELS"),
-        help="Comma-separated object labels for Perception (e.g. bowl,apple).",
+        help="Optional comma-separated labels; if omitted, LLM infers labels from --task first.",
     )
     parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL"), help="OpenAI model name.")
     parser.add_argument(
@@ -285,13 +305,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Retries before planning until detections match labels (or SYSTEM2_SNAPSHOT_MAX_ATTEMPTS).",
     )
-    parser.add_argument(
-        "--any-label-match",
-        dest="require_every_tracked_label",
-        action="store_false",
-        help="Stop waiting when at least one object is detected (not every label).",
-    )
-    parser.set_defaults(require_every_tracked_label=True)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -303,10 +316,6 @@ def main(argv: list[str] | None = None) -> int:
     if not args.task:
         logger.error("Missing --task or SYSTEM2_TASK in .env")
         return 2
-    if not args.labels:
-        logger.error("Missing --labels or SYSTEM2_LABELS in .env")
-        return 2
-
     from reachy2_sdk import ReachySDK
 
     reachy = ReachySDK(args.host)
@@ -314,7 +323,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Could not connect to Reachy at %s", args.host)
         return 3
 
-    labels = [s.strip() for s in args.labels.split(",") if s.strip()]
+    labels = (
+        [s.strip() for s in args.labels.split(",") if s.strip()]
+        if args.labels and args.labels.strip()
+        else None
+    )
     log_runs = log_runs_enabled() and not args.no_log_runs
     run_closed_loop(
         reachy=reachy,
@@ -328,7 +341,6 @@ def main(argv: list[str] | None = None) -> int:
         log_runs=log_runs,
         robot_host=args.host,
         perception_max_attempts=args.perception_max_attempts,
-        require_every_tracked_label=args.require_every_tracked_label,
     )
     return 0
 
