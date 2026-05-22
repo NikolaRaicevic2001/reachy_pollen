@@ -355,7 +355,7 @@ Pass the repo for trained policy best checkpoint as `policy.path`. Videos and tr
 ```
 lerobot-record \
   --robot.type=reachy2 \
-  --robot.ip_address="192.168.10.172" \
+  --robot.ip_address="192.168.137.100" \
   --robot.id="r2-0008" \
   --robot.use_external_commands=false \
   --robot.with_mobile_base=false \
