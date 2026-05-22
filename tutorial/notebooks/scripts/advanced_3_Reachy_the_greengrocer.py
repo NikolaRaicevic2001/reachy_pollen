@@ -31,7 +31,7 @@ from scipy.spatial.transform import Rotation as R
 # Configuration
 # ---------------------------------------------------------------------------
 
-ROBOT_HOST = "192.168.10.172"
+ROBOT_HOST = "192.168.137.100"
 MUJOCO_MODE = False
 MANUAL_GATE = True
 GATE_WINDOW = "greengrocer - confirm"
@@ -50,11 +50,11 @@ OWL_VIT_THRESHOLD = 0.05
 DISTANCES = {
     "base_back_to_prep": 0.30,
     "base_forward_to_grasp": 0.30,
-    "base_back_on_finish": 0.20,
-    "drop_above_goal": 0.15,
+    "base_back_on_finish": 0.30,
+    "drop_above_goal": 0.3,
     "drop_descend": 0.10,
     "post_drop_lift": 0.15,
-    "post_grasp_lift": 0.10,
+    "post_grasp_lift": 0.30,
     "pregrasp_offset_x": 0.08,
     "torso_safety_x": 0.15,
     "torso_safety_y": 0.15,
@@ -619,6 +619,7 @@ def shutdown_sequence(reachy: ReachySDK, perception: Optional[Perception] = None
 
     print("[shutdown] Returning to default posture...")
     reachy.goto_posture("default", duration=2, wait=True)
+    reachy.mobile_base.translate_by(back, 0, wait=True)
 
     if perception is not None:
         stop_perception(perception)
@@ -650,6 +651,13 @@ def main() -> None:
         print("[prep] Going to default posture...")
         reachy.goto_posture("default")
 
+        confirm("About to start Perception (loads OwlVit, may take ~1 min).")
+        r_cam, perception, owlvit, annotator, labels = build_perception_stack(reachy)
+
+        # confirm("About to start the live detection loop (continuous feed; ENTER to accept).")
+        # accepted = live_detection_loop(r_cam, perception, owlvit, annotator, labels)
+        # print(f"[live] Accepted snapshot ({len(accepted)} tracked objects) — starting manipulation sequence.")
+
         back = DISTANCES["base_back_to_prep"]
         confirm(f"About to back up {back}m to make space for the arms.")
         print(f"\n[prep] Backing up {back}m to make space for the arms...")
@@ -665,14 +673,7 @@ def main() -> None:
         print(f"\n[prep] Moving forward {forward}m to grasp position at the table...")
         reachy.mobile_base.translate_by(forward, 0, wait=True)
 
-        confirm("About to start Perception (loads OwlVit, may take ~1 min).")
-        r_cam, perception, owlvit, annotator, labels = build_perception_stack(reachy)
-
-        # confirm("About to start the live detection loop (continuous feed; ENTER to accept).")
-        # accepted = live_detection_loop(r_cam, perception, owlvit, annotator, labels)
-        # print(f"[live] Accepted snapshot ({len(accepted)} tracked objects) — starting manipulation.")
-
-        confirm("Live detections accepted. About to start the manipulation loop.")
+        confirm("About to start the manipulation loop.")
         manipulation_loop(reachy, perception, r_cam, owlvit, annotator, labels)
 
     except KeyboardInterrupt:
