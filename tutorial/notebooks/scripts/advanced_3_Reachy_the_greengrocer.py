@@ -33,7 +33,7 @@ from scipy.spatial.transform import Rotation as R
 
 ROBOT_HOST = "192.168.137.100"
 MUJOCO_MODE = False
-MANUAL_GATE = True
+MANUAL_GATE = False
 GATE_WINDOW = "greengrocer - confirm"
 
 # Picking targets and where they go (None on either side disables that arm).
@@ -43,18 +43,17 @@ GOAL_LEFT = "metal bowl"
 GOAL_RIGHT = "rectangular basket"
 
 PERCEPTION_FREQ = 40
-DETECTION_THRESHOLD = 0.1
+DETECTION_THRESHOLD = 0.15
 MIN_DETECTION_THRESHOLD = 0.05
 OWL_VIT_THRESHOLD = 0.05
 
 DISTANCES = {
     "base_back_to_prep": 0.30,
-    "base_forward_to_grasp": 0.30,
     "base_back_on_finish": 0.30,
-    "drop_above_goal": 0.3,
+    "drop_above_goal": 0.22,
     "drop_descend": 0.10,
     "post_drop_lift": 0.15,
-    "post_grasp_lift": 0.30,
+    "post_grasp_lift": 0.15,
     "pregrasp_offset_x": 0.08,
     "torso_safety_x": 0.15,
     "torso_safety_y": 0.15,
@@ -619,7 +618,6 @@ def shutdown_sequence(reachy: ReachySDK, perception: Optional[Perception] = None
 
     print("[shutdown] Returning to default posture...")
     reachy.goto_posture("default", duration=2, wait=True)
-    reachy.mobile_base.translate_by(back, 0, wait=True)
 
     if perception is not None:
         stop_perception(perception)
@@ -654,24 +652,18 @@ def main() -> None:
         confirm("About to start Perception (loads OwlVit, may take ~1 min).")
         r_cam, perception, owlvit, annotator, labels = build_perception_stack(reachy)
 
-        # confirm("About to start the live detection loop (continuous feed; ENTER to accept).")
-        # accepted = live_detection_loop(r_cam, perception, owlvit, annotator, labels)
-        # print(f"[live] Accepted snapshot ({len(accepted)} tracked objects) — starting manipulation sequence.")
-
         back = DISTANCES["base_back_to_prep"]
-        confirm(f"About to back up {back}m to make space for the arms.")
-        print(f"\n[prep] Backing up {back}m to make space for the arms...")
+        confirm(f"About to back up {back}m to make space for the arms and come back to origin.")
+        print(f"\n[prep] Backing up {back}m to make space for the arms and come back to origin")
         reachy.mobile_base.reset_odometry()
-        reachy.mobile_base.translate_by(-back, 0, wait=True)
-
-        confirm("About to raise arms to waiting pose.")
-        print("\n[prep] Raising arms to ready/waiting pose...")
+        reachy.mobile_base.goto(-back, 0, 0, wait=True) 
+        time.sleep(1)
         get_to_waiting_pose(reachy, duration=3)
+        reachy.mobile_base.translate_by(back, 0, wait=True)
 
-        forward = DISTANCES["base_forward_to_grasp"]
-        confirm(f"About to move forward {forward}m to grasp position at the table.")
-        print(f"\n[prep] Moving forward {forward}m to grasp position at the table...")
-        reachy.mobile_base.translate_by(forward, 0, wait=True)
+        confirm("About to start the live detection loop (continuous feed; ENTER to accept).")
+        accepted = live_detection_loop(r_cam, perception, owlvit, annotator, labels)
+        print(f"[live] Accepted snapshot ({len(accepted)} tracked objects) — starting manipulation sequence.")
 
         confirm("About to start the manipulation loop.")
         manipulation_loop(reachy, perception, r_cam, owlvit, annotator, labels)
