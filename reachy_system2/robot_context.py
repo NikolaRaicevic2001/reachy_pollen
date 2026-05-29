@@ -195,7 +195,10 @@ def format_scene_hints_for_llm(scene_description: str, robot_context: str) -> st
     ]
     if z_support is not None:
         lines.append(f"- Estimated support surface z (table): {z_support:.3f}")
-    pick = manip[0] if len(manip) == 1 else max(manip, key=lambda o: o[3])
+    pick: tuple[str, float, float, float] | None = None
+    if manip:
+        # Choose the tallest manipulandum as the primary pick target hint.
+        pick = manip[0] if len(manip) == 1 else max(manip, key=lambda o: o[3])
     if manip:
         z_obj_top = max(z for _n, _x, _y, z in manip)
         lines.append(

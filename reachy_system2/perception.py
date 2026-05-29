@@ -334,6 +334,7 @@ class System2Perception:
         settling_s: float | None = None,
         max_attempts: int | None = None,
         retry_settling_s: float | None = None,
+        allow_partial: bool = False,
     ) -> PerceptionSnapshot:
         """Repeatedly grab frames until detections match ``labels``, or raise after ``max_attempts``.
 
@@ -366,6 +367,14 @@ class System2Perception:
 
         assert last is not None
         missing = missing_tracked_labels(last.objects, labels)
+        if allow_partial:
+            logger.warning(
+                "Perception did not satisfy tracked labels after %s attempts; proceeding with partial detections. "
+                "Missing=%s",
+                max_att,
+                missing,
+            )
+            return last
         raise RuntimeError(
             f"Perception did not satisfy criteria after {max_att} attempts: "
             f"each tracked label must match a detection name (loose substring), not merely N objects. "
@@ -374,3 +383,145 @@ class System2Perception:
             "Try lowering PERCEPTION_DETECTION_THRESHOLD, renaming labels to match OWL-ViT output, "
             "or raising SYSTEM2_SNAPSHOT_MAX_ATTEMPTS."
         )
+
+    def live_preview_loop(
+        self,
+        labels: Sequence[str],
+        *,
+        detection_threshold: float | None = None,
+        display_hz: float = 5.0,
+        window_name: str = "system2-perception-live",
+        show_raw_owl: bool = True,
+    ) -> PerceptionSnapshot:
+        """Interactive live view for tuning labels/thresholds (keep ``start(visualize=False)``).
+
+        Pollen's ``start(visualize=True)`` runs OWL-ViT + SAM + ``cv2.imshow`` inside the
+        background thread at ``PERCEPTION_FREQ`` (default 40 Hz), which is heavy and often
+        conflicts with Jupyter. This loop instead:
+
+        - leaves the background tracker at full speed with ``visualize=False``
+        - displays at ``display_hz`` (default 5 Hz)
+        - optionally overlays **raw OWL-ViT** boxes (what the detector sees before temporal filter)
+        - prints filtered object names and missing labels each frame
+
+        Controls: ENTER = accept and return last snapshot, Q/ESC = abort.
+        """
+        import cv2
+
+        if not self._started:
+            raise RuntimeError("Call start() before live_preview_loop().")
+
+        thr = float(detection_threshold if detection_threshold is not None else self._default_detection_threshold)
+        interval_s = 1.0 / max(float(display_hz), 0.5)
+        label_list = list(labels)
+
+        print(
+            f"\n[live] window={window_name!r}  display_hz={display_hz}  threshold={thr}\n"
+            f"       labels={label_list}\n"
+            "       ENTER = accept current frame, Q/ESC = abort\n"
+        )
+
+        last_snap: PerceptionSnapshot | None = None
+        last_printed: tuple[str, ...] | None = None
+
+        try:
+            while True:
+                t0 = time.time()
+
+                data, _, _ = self._r_cam.get_data()
+                img = data.get("left") if isinstance(data, dict) else data
+                if img is None and isinstance(data, dict):
+                    img = data.get("rgb")
+                if img is None:
+                    raise RuntimeError("Camera get_data() returned no RGB image.")
+
+                rgb = np.asarray(img)
+                filtered = self._perception.get_objects_infos(thr)
+                names = _unique_detection_names(filtered)
+                missing = missing_tracked_labels(filtered, label_list)
+
+                raw_preds: list[dict[str, Any]] = []
+                if show_raw_owl:
+                    # Raw OWL-ViT (BGR channel order expected by pollen OwlVitWrapper).
+                    raw_preds = list(
+                        self._perception.Owl.infer(
+                            rgb[:, :, ::-1],
+                            label_list,
+                            detection_threshold=thr,
+                        )
+                    )
+                    display_rgb = annotate_rgb(rgb, _objects_from_owl_predictions(raw_preds))
+                else:
+                    display_rgb = annotate_rgb(rgb, filtered)
+
+                display_bgr = display_rgb[:, :, ::-1].copy()
+                hud = f"filtered={names or '(none)'}  missing={missing or '(none)'}"
+                cv2.putText(
+                    display_bgr,
+                    hud,
+                    (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (0, 255, 255),
+                    2,
+                )
+
+                cv2.imshow(window_name, display_bgr)
+                key = cv2.waitKey(1) & 0xFF
+
+                if tuple(names) != last_printed:
+                    print(f"[live] filtered={names!r}  missing={missing!r}")
+                    if show_raw_owl and raw_preds:
+                        raw_labels = [p.get("label", "?") for p in raw_preds]
+                        raw_scores = [float(p.get("score", 0.0)) for p in raw_preds]
+                        print(f"[live] raw OWL: {list(zip(raw_labels, raw_scores))}")
+                    last_printed = tuple(names)
+
+                last_snap = PerceptionSnapshot(
+                    rgb=rgb,
+                    annotated_rgb=display_rgb,
+                    scene=format_scene_for_llm(
+                        filtered,
+                        T_reachy_cam=self._T_reachy_cam,
+                        assume_poses_already_in_robot_frame=self._assume_robot,
+                    ),
+                    objects=list(filtered),
+                    depth_viz_rgb=None,
+                )
+
+                if key in (13, 10):
+                    print("[live] ENTER — accepting frame.")
+                    break
+                if key in (27, ord("q"), ord("Q")):
+                    raise KeyboardInterrupt("Live preview aborted.")
+
+                elapsed = time.time() - t0
+                sleep_s = interval_s - elapsed
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+        finally:
+            cv2.destroyWindow(window_name)
+
+        assert last_snap is not None
+        return last_snap
+
+
+def _objects_from_owl_predictions(predictions: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert raw OWL-ViT predictions to minimal object dicts for ``annotate_rgb``."""
+    out: list[dict[str, Any]] = []
+    for p in predictions:
+        box = p.get("box") or {}
+        if not box:
+            continue
+        xmin = int(box.get("xmin", 0))
+        ymin = int(box.get("ymin", 0))
+        xmax = int(box.get("xmax", 0))
+        ymax = int(box.get("ymax", 0))
+        out.append(
+            {
+                "name": str(p.get("label", "")),
+                "bbox": [xmin, ymin, xmax, ymax],
+                "detection_score": float(p.get("score", 0.0)),
+            }
+        )
+    return out

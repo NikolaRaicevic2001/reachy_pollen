@@ -99,3 +99,45 @@ def hover_above_object_m_default() -> float:
 def verify_max_retries_default() -> int:
     """After FAILED verification, how many failure-replan attempts per planned subtask."""
     return _i("SYSTEM2_MAX_VERIFY_RETRIES", 2)
+
+
+def mobile_base_timeout_s_default() -> float:
+    """Default timeout for mobile base moves when wait=True (seconds)."""
+    return _f("SYSTEM2_MOBILE_BASE_TIMEOUT_S", 10.0)
+
+
+@dataclass(frozen=True)
+class ArmReachBand:
+    """Comfortable arm reach in robot frame (subset of SafeWorkspace). Outside → use mobile base."""
+
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    # Require pick xy x ≤ (xmax - forward_x_margin) so the arm is not at maximum stretch (+X).
+    forward_x_margin: float
+
+    @classmethod
+    def from_env(cls) -> ArmReachBand:
+        return cls(
+            xmin=_f("ARM_REACH_XMIN", 0.22),
+            xmax=_f("ARM_REACH_XMAX", 0.72),
+            ymin=_f("ARM_REACH_YMIN", -0.55),
+            ymax=_f("ARM_REACH_YMAX", 0.55),
+            forward_x_margin=_f("ARM_REACH_FORWARD_MARGIN_M", 0.20),
+        )
+
+    def effective_xmax(self) -> float:
+        return self.xmax - self.forward_x_margin
+
+    def contains_xy(self, x: float, y: float) -> bool:
+        return self.xmin <= x <= self.effective_xmax() and self.ymin <= y <= self.ymax
+
+
+def max_base_approach_rounds_default() -> int:
+    return _i("SYSTEM2_MAX_BASE_APPROACH_ROUNDS", 3)
+
+
+def reset_odometry_on_run_default() -> bool:
+    raw = os.environ.get("SYSTEM2_RESET_ODOMETRY", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")

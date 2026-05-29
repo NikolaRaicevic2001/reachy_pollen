@@ -9,6 +9,8 @@ def subtask_verification_mode(description: str) -> str:
     Returns one of: kinematic, approach, grasp, place.
     """
     d = description.lower()
+    if any(w in d for w in ("mobile base", "mobile_base", "rotate", "translation", "translate", "move base", "turn base")):
+        return "kinematic"
     if any(w in d for w in ("grasp", "grip the", "close gripper", "pick up the", "pick the")):
         return "grasp"
     if any(w in d for w in ("place", "release", "open gripper", "drop", "into the", "into the bowl")):

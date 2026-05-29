@@ -19,3 +19,21 @@ r_arm_rotate / l_arm_rotate
 
 r_gripper_goto / l_gripper_goto
   Gripper open/close only. position 0=closed, 100=open; duration [s]."""
+
+
+MOBILE_BASE_OPS_FOR_LLM = """
+
+MOBILE BASE (Reachy is mounted on a mobile base; movements are in the odometry frame):
+
+mobile_base_translate_by
+  Relative translation in meters. Fields: x, y [m], wait [bool], timeout [s].
+  Example: {"op":"mobile_base_translate_by","x":0.2,"y":0.0,"wait":true,"timeout":5}
+
+mobile_base_rotate_by
+  Relative rotation in degrees. Fields: theta [deg], wait [bool], timeout [s].
+  Example: {"op":"mobile_base_rotate_by","theta":-90.0,"wait":true}
+
+Notes:
+- Use mobile base moves to change viewpoint when required objects are not visible yet (e.g. “on your right”, “behind”, “on a chair”).
+- After a base move, expect PERCEPTION to change; re-check detections before planning arm motions.
+"""

@@ -10,7 +10,7 @@ import numpy as np
 
 from reachy2_sdk.utils.utils import get_pose_matrix
 
-from reachy_system2.config import SafeWorkspace
+from reachy_system2.config import SafeWorkspace, mobile_base_timeout_s_default
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,41 @@ class ActionExecutor:
             dur = float(action.get("duration", 2.0))
             self.reachy.l_arm.gripper.goto(pos, duration=dur, interpolation_mode="minimum_jerk", wait=wait)
             return ExecutionResult(True, "l_gripper_goto ok")
+
+        if op == "mobile_base_translate_by":
+            mb = getattr(self.reachy, "mobile_base", None)
+            if mb is None:
+                return ExecutionResult(False, "reachy.mobile_base is not available")
+            is_on = getattr(mb, "is_on", None)
+            if callable(is_on) and not is_on():
+                turn_on = getattr(mb, "turn_on", None)
+                if callable(turn_on):
+                    turn_on()
+            x = float(action.get("x", 0.0))
+            y = float(action.get("y", 0.0))
+            timeout = action.get("timeout", mobile_base_timeout_s_default() if wait else None)
+            kwargs: dict[str, Any] = {"wait": wait}
+            if timeout is not None:
+                kwargs["timeout"] = float(timeout)
+            mb.translate_by(x=x, y=y, **kwargs)
+            return ExecutionResult(True, "mobile_base_translate_by ok")
+
+        if op == "mobile_base_rotate_by":
+            mb = getattr(self.reachy, "mobile_base", None)
+            if mb is None:
+                return ExecutionResult(False, "reachy.mobile_base is not available")
+            is_on = getattr(mb, "is_on", None)
+            if callable(is_on) and not is_on():
+                turn_on = getattr(mb, "turn_on", None)
+                if callable(turn_on):
+                    turn_on()
+            theta = float(action.get("theta", 0.0))
+            timeout = action.get("timeout", mobile_base_timeout_s_default() if wait else None)
+            kwargs = {"wait": wait}
+            if timeout is not None:
+                kwargs["timeout"] = float(timeout)
+            mb.rotate_by(theta=theta, **kwargs)
+            return ExecutionResult(True, "mobile_base_rotate_by ok")
 
         return ExecutionResult(False, f"unknown op: {op}")
 

@@ -13,11 +13,15 @@ import numpy as np
 from openai import OpenAI
 
 from reachy_system2.prompts import (
+    BASE_APPROACH_SYSTEM_PROMPT,
+    EXPLORE_SYSTEM_PROMPT,
     LABELS_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT,
     REPLAN_AFTER_FAILURE_SYSTEM_PROMPT,
     REPLAN_OOB_SYSTEM_PROMPT,
     VERIFY_SYSTEM_PROMPT,
+    _PLAN_PHASE_PICK,
+    _PLAN_PHASE_PLACE,
 )
 from reachy_system2.run_tracker import RunTracker
 
@@ -36,6 +40,8 @@ _ALLOWED_ACTION_OPS = frozenset(
         "l_arm_rotate",
         "r_gripper_goto",
         "l_gripper_goto",
+        "mobile_base_translate_by",
+        "mobile_base_rotate_by",
     }
 )
 
@@ -293,6 +299,22 @@ def _validate_plan_schema(plan: Any) -> dict[str, Any]:
     return plan
 
 
+def _validate_explore_plan_schema(plan: Any) -> dict[str, Any]:
+    """Exploration plans must contain only mobile base actions, and be short."""
+    plan = _validate_plan_schema(plan)
+    subs = plan["subtasks"]
+    if len(subs) > 2:
+        raise ValueError("Exploration plan must have at most 2 subtasks.")
+    for si, s in enumerate(subs):
+        for ai, a in enumerate(s.get("actions", [])):
+            op = a.get("op")
+            if op not in ("mobile_base_translate_by", "mobile_base_rotate_by"):
+                raise ValueError(
+                    f"explore.subtasks[{si}].actions[{ai}] must be a mobile base op, got {op!r}."
+                )
+    return plan
+
+
 class ReasoningClient:
     def __init__(
         self,
@@ -340,10 +362,21 @@ class ReasoningClient:
         robot_context: str | None = None,
         workspace_bounds: str | None = None,
         scene_hints: str | None = None,
+        world_memory: str | None = None,
+        mobile_base_odometry: str | None = None,
+        phase: str | None = None,
     ) -> dict[str, Any]:
         user_text = f"TASK:\n{task}\n\n"
+        if phase == "pick":
+            user_text += _PLAN_PHASE_PICK + "\n"
+        elif phase == "place":
+            user_text += _PLAN_PHASE_PLACE + "\n"
         if robot_context:
             user_text += f"{robot_context}\n\n"
+        if mobile_base_odometry:
+            user_text += f"{mobile_base_odometry}\n\n"
+        if world_memory:
+            user_text += f"{world_memory}\n\n"
         user_text += f"PERCEPTION:\n{scene_description}\n"
         if scene_hints:
             user_text += f"\n{scene_hints}\n"
@@ -376,6 +409,76 @@ class ReasoningClient:
         logger.debug("generate_plan raw response: %s", raw[:2000])
         data = _parse_llm_json(raw, context="generate_plan")
         return _validate_plan_schema(data)
+
+    def generate_exploration_plan(
+        self,
+        *,
+        task: str,
+        scene_description: str,
+        rgb: np.ndarray,
+        missing_labels: Sequence[str],
+        depth_viz_rgb: np.ndarray | None = None,
+    ) -> dict[str, Any]:
+        """Suggest mobile base moves to reveal missing objects in perception."""
+        user_text = (
+            f"TASK:\n{task}\n\n"
+            f"PERCEPTION:\n{scene_description}\n\n"
+            f"MISSING_LABELS: {', '.join(str(x) for x in missing_labels)}\n"
+        )
+        content = _user_multimodal_rgb_depth(user_text, rgb, depth_viz_rgb)
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": EXPLORE_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.2,
+        )
+        if self._run_tracker is not None:
+            self._run_tracker.record_llm_response("generate_exploration_plan", self.model, resp)
+        raw = resp.choices[0].message.content or ""
+        data = _parse_llm_json(raw, context="generate_exploration_plan")
+        return _validate_explore_plan_schema(data)
+
+    def generate_base_approach_plan(
+        self,
+        *,
+        task: str,
+        target_label: str,
+        target_xyz: tuple[float, float, float],
+        arm_reach_zone: str,
+        scene_description: str,
+        rgb: np.ndarray,
+        world_memory: str | None = None,
+        mobile_base_odometry: str | None = None,
+        depth_viz_rgb: np.ndarray | None = None,
+    ) -> dict[str, Any]:
+        """Mobile-base moves to bring a distant target into arm reach."""
+        user_text = (
+            f"TASK:\n{task}\n\n"
+            f"TARGET_LABEL: {target_label}\n"
+            f"TARGET_XYZ (robot frame, meters): {list(target_xyz)}\n\n"
+            f"ARM_REACH_ZONE:\n{arm_reach_zone}\n\n"
+        )
+        if mobile_base_odometry:
+            user_text += f"{mobile_base_odometry}\n\n"
+        if world_memory:
+            user_text += f"{world_memory}\n\n"
+        user_text += f"PERCEPTION:\n{scene_description}\n"
+        content = _user_multimodal_rgb_depth(user_text, rgb, depth_viz_rgb)
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": BASE_APPROACH_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.2,
+        )
+        if self._run_tracker is not None:
+            self._run_tracker.record_llm_response("generate_base_approach_plan", self.model, resp)
+        raw = resp.choices[0].message.content or ""
+        data = _parse_llm_json(raw, context="generate_base_approach_plan")
+        return _validate_explore_plan_schema(data)
 
     def verify_execution(
         self,
@@ -459,6 +562,8 @@ class ReasoningClient:
         scene_hints: str | None = None,
         depth_viz_rgb: np.ndarray | None = None,
         tracked_labels: Sequence[str] | None = None,
+        world_memory: str | None = None,
+        mobile_base_odometry: str | None = None,
     ) -> dict[str, Any]:
         """Recovery plan from post-failure perception (re-approach, re-grasp, etc.)."""
         import json as _json
@@ -471,6 +576,10 @@ class ReasoningClient:
         )
         if robot_context:
             user_text += f"{robot_context}\n\n"
+        if mobile_base_odometry:
+            user_text += f"{mobile_base_odometry}\n\n"
+        if world_memory:
+            user_text += f"{world_memory}\n\n"
         user_text += f"PERCEPTION_AFTER:\n{scene_description}\n"
         if scene_hints:
             user_text += f"\n{scene_hints}\n\n"
