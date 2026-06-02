@@ -60,6 +60,20 @@ def perception_freq_default() -> float:
 def perception_detection_threshold_default() -> float:
     return _f("PERCEPTION_DETECTION_THRESHOLD", 0.1)
 
+# add alternative perception model YOLO
+def perception_detector_default() -> str:
+    return os.environ.get("PERCEPTION_DETECTOR", "owl_vit").strip().lower()
+
+
+def yolo_world_model_default() -> str:
+    return os.environ.get("YOLO_WORLD_MODEL", "yolov8s-worldv2.pt").strip()
+
+
+def yolo_world_device_default() -> str | None:
+    raw = os.environ.get("YOLO_WORLD_DEVICE")
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip()
 
 def perception_snapshot_max_attempts_default() -> int:
     """How many `snapshot()` tries before planning when waiting for detections."""
