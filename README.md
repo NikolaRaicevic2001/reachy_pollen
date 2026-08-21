@@ -156,6 +156,12 @@ echo 'HF_TOKEN=hf_your_token_here' > ~/.config/lerobot/hf.env
 chmod 600 ~/.config/lerobot/hf.env
 ```
 
+Create persistent dataset storage:
+
+```bash
+mkdir -p /home/bedrock/lerobot-data
+```
+
 #### Start LeRobot
 
 ```bash
@@ -163,22 +169,19 @@ docker run --rm -it \
   --network host \
   --env-file ~/.config/lerobot/hf.env \
   -v /home/bedrock/robot_reachy2.py:/lerobot/src/lerobot/robots/reachy2/robot_reachy2.py \
+  -v /home/bedrock/lerobot-data:/data \
   huggingface/lerobot-cpu:latest \
   bash
 ```
 
-If restarting the same dataset with `--resume=false`:
-
-```bash
-rm -rf ~/.cache/huggingface/lerobot/erl-hub/reachy-cleaning
-```
-
-Record:
+#### Record
 
 ```bash
 lerobot-record \
   --robot.type=reachy2 \
   --robot.ip_address=127.0.0.1 \
+  --robot.id=r2-0008 \
+  --robot.use_external_commands=true \
   --robot.with_mobile_base=false \
   --robot.with_l_arm=true \
   --robot.with_r_arm=true \
@@ -187,19 +190,27 @@ lerobot-record \
   --robot.with_left_teleop_camera=false \
   --robot.with_right_teleop_camera=false \
   --robot.with_torso_camera=true \
+  --robot.camera_width=640 \
+  --robot.camera_height=480 \
+  --robot.disable_torque_on_disconnect=false \
+  --robot.max_relative_target=5.0 \
   --teleop.type=reachy2_teleoperator \
   --teleop.ip_address=127.0.0.1 \
+  --teleop.use_present_position=true \
   --teleop.with_mobile_base=false \
   --teleop.with_l_arm=true \
   --teleop.with_r_arm=true \
   --teleop.with_neck=true \
   --teleop.with_antennas=false \
   --dataset.repo_id=erl-hub/reachy-cleaning \
+  --dataset.root=/data/reachy-cleaning \
   --dataset.single_task="Organize the table by placing the fruits in the bowl and cans, bottles, and boxes in the basket" \
   --dataset.num_episodes=1 \
-  --dataset.episode_time_s=90 \
-  --dataset.reset_time_s=60 \
+  --dataset.episode_time_s=10 \
+  --dataset.reset_time_s=10 \
   --dataset.fps=15 \
+  --dataset.vcodec=h264 \
+  --dataset.streaming_encoding=false \
   --dataset.private=false \
   --dataset.push_to_hub=true \
   --display_data=false \
@@ -207,6 +218,11 @@ lerobot-record \
   --resume=false
 ```
 
+Use `--resume=false` for the first episode. For subsequent episodes, use:
+
+```bash
+--resume=true
+```
 ### Upload the datasets
 ```
 # Navigate to the data
