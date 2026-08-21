@@ -132,14 +132,79 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\lerobot\erl-hub
 ```
 
 ### Recording: On the Robot with Docker
+
+#### One-time setup
+
+Copy the patched Reachy2 interface to `bedrock`:
+
+```powershell
+scp .\teleoperation\robot_reachy2.py `
+  bedrock@192.168.137.100:/home/bedrock/robot_reachy2.py
 ```
-docker run -dit \
-  --name lerobot_container \
-  --net=host \
-  --pid=host \
-  -v $(pwd)/robot_reachy2.py:/lerobot/src/lerobot/robots/reachy2/robot_reachy2.py \
-  huggingface/lerobot-cpu \
-  sleep infinity    
+
+SSH into `bedrock`:
+
+```powershell
+ssh bedrock@192.168.137.100
+```
+
+Store the Hugging Face token:
+
+```bash
+mkdir -p ~/.config/lerobot
+echo 'HF_TOKEN=hf_your_token_here' > ~/.config/lerobot/hf.env
+chmod 600 ~/.config/lerobot/hf.env
+```
+
+#### Start LeRobot
+
+```bash
+docker run --rm -it \
+  --network host \
+  --env-file ~/.config/lerobot/hf.env \
+  -v /home/bedrock/robot_reachy2.py:/lerobot/src/lerobot/robots/reachy2/robot_reachy2.py \
+  huggingface/lerobot-cpu:latest \
+  bash
+```
+
+If restarting the same dataset with `--resume=false`:
+
+```bash
+rm -rf ~/.cache/huggingface/lerobot/erl-hub/reachy-cleaning
+```
+
+Record:
+
+```bash
+lerobot-record \
+  --robot.type=reachy2 \
+  --robot.ip_address=127.0.0.1 \
+  --robot.with_mobile_base=false \
+  --robot.with_l_arm=true \
+  --robot.with_r_arm=true \
+  --robot.with_neck=true \
+  --robot.with_antennas=false \
+  --robot.with_left_teleop_camera=false \
+  --robot.with_right_teleop_camera=false \
+  --robot.with_torso_camera=true \
+  --teleop.type=reachy2_teleoperator \
+  --teleop.ip_address=127.0.0.1 \
+  --teleop.with_mobile_base=false \
+  --teleop.with_l_arm=true \
+  --teleop.with_r_arm=true \
+  --teleop.with_neck=true \
+  --teleop.with_antennas=false \
+  --dataset.repo_id=erl-hub/reachy-cleaning \
+  --dataset.single_task="Organize the table by placing the fruits in the bowl and cans, bottles, and boxes in the basket" \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=90 \
+  --dataset.reset_time_s=60 \
+  --dataset.fps=15 \
+  --dataset.private=false \
+  --dataset.push_to_hub=true \
+  --display_data=false \
+  --play_sounds=false \
+  --resume=false
 ```
 
 ### Upload the datasets

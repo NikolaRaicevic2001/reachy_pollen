@@ -17,6 +17,10 @@ from reachy_system2.config import (
     perception_retry_settling_s_default,
     perception_snapshot_max_attempts_default,
     settling_s_default,
+
+    perception_detector_default,
+    yolo_world_device_default,
+    yolo_world_model_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,6 +217,75 @@ def annotate_rgb(rgb: np.ndarray, detected_objects: Sequence[dict[str, Any]]) ->
         return annotator.annotate(im=im, detection_predictions=predictions, masks=masks)
     return annotator.annotate(im=im, detection_predictions=predictions)
 
+class YoloWorldDetectorAdapter:
+    """YOLO-World adapter that mimics pollen_vision OwlVitWrapper.infer()."""
+
+    def __init__(self, model_name: str, *, device: str | None = None) -> None:
+        from ultralytics import YOLOWorld
+
+        self._model = YOLOWorld(model_name)
+        self._device = device
+        self._classes: tuple[str, ...] = ()
+
+    def infer(
+        self,
+        image_bgr: np.ndarray,
+        labels: Sequence[str],
+        *,
+        detection_threshold: float = 0.1,
+    ) -> list[dict[str, Any]]:
+        label_list = tuple(str(label).strip() for label in labels if str(label).strip())
+        if not label_list:
+            return []
+
+        if label_list != self._classes:
+            self._model.set_classes(list(label_list))
+            self._classes = label_list
+
+        image_rgb = np.asarray(image_bgr)
+        if image_rgb.ndim != 3 or image_rgb.shape[2] < 3:
+            raise ValueError(f"Expected HxWx3 BGR image, got shape {image_rgb.shape}")
+        image_rgb = image_rgb[:, :, :3][:, :, ::-1]
+
+        kwargs: dict[str, Any] = {
+            "conf": float(detection_threshold),
+            "verbose": False,
+        }
+        if self._device is not None:
+            kwargs["device"] = self._device
+
+        results = self._model.predict(image_rgb, **kwargs)
+        if not results:
+            return []
+
+        result = results[0]
+        boxes = getattr(result, "boxes", None)
+        if boxes is None or len(boxes) == 0:
+            return []
+
+        xyxy = boxes.xyxy.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        cls = boxes.cls.cpu().numpy().astype(int)
+
+        predictions: list[dict[str, Any]] = []
+        h, w = image_rgb.shape[:2]
+        for box, score, class_id in zip(xyxy, conf, cls):
+            if class_id < 0 or class_id >= len(label_list):
+                continue
+            xmin, ymin, xmax, ymax = box.tolist()
+            predictions.append(
+                {
+                    "label": label_list[class_id],
+                    "score": float(score),
+                    "box": {
+                        "xmin": int(max(0, min(w - 1, round(xmin)))),
+                        "ymin": int(max(0, min(h - 1, round(ymin)))),
+                        "xmax": int(max(0, min(w - 1, round(xmax)))),
+                        "ymax": int(max(0, min(h - 1, round(ymax)))),
+                    },
+                }
+            )
+        return predictions
 
 class System2Perception:
     """Owns PollenSDKCameraWrapper + pollen_vision Perception lifecycle."""
@@ -250,6 +323,22 @@ class System2Perception:
             freq=self._freq,
             detection_threshold=self._default_detection_threshold,
         )
+        # TODO：add alternative dectection YOLO here
+        #
+        detector = perception_detector_default()
+        if detector == "yolo_world":
+            self._perception.Owl = YoloWorldDetectorAdapter(
+                yolo_world_model_default(),
+                device=yolo_world_device_default(),
+            )
+            logger.info("Using YOLO-World detector backend: %s", yolo_world_model_default())
+        elif detector in ("owl_vit", "owlvit", "owl"):
+            logger.info("Using default OWL-ViT detector backend.")
+        else:
+            raise ValueError(
+                f"Unknown PERCEPTION_DETECTOR={detector!r}; expected 'owl_vit' or 'yolo_world'."
+            )
+        
         self._started = False
 
     @property
