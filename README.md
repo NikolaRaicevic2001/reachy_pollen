@@ -163,6 +163,7 @@ docker run --rm -it \
   --network host \
   --env-file ~/.config/lerobot/hf.env \
   -v /home/bedrock/robot_reachy2.py:/lerobot/src/lerobot/robots/reachy2/robot_reachy2.py \
+  -v /home/bedrock/lerobot-data:/data \
   huggingface/lerobot-cpu:latest \
   bash
 ```
@@ -195,6 +196,7 @@ lerobot-record \
   --teleop.with_neck=true \
   --teleop.with_antennas=false \
   --dataset.repo_id=erl-hub/reachy-cleaning \
+  --dataset.root=/data/reachy-cleaning \
   --dataset.single_task="Organize the table by placing the fruits in the bowl and cans, bottles, and boxes in the basket" \
   --dataset.num_episodes=1 \
   --dataset.episode_time_s=90 \
@@ -205,6 +207,11 @@ lerobot-record \
   --display_data=false \
   --play_sounds=false \
   --resume=false
+```
+Use `--resume=false` for the first episode. For subsequent episodes, use:
+
+```bash
+--resume=true
 ```
 
 ### Upload the datasets
